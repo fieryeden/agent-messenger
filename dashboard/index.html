@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Messenger</title>
+    <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar: Agent List -->
+        <aside id="sidebar">
+            <div class="sidebar-header">
+                <h2>🤖 Agents</h2>
+                <button id="btn-refresh-agents" title="Refresh">⟳</button>
+            </div>
+            <div id="agent-list" class="agent-list"></div>
+
+            <div class="sidebar-section">
+                <h3>📊 Stats</h3>
+                <div id="stats"></div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main id="main">
+            <!-- Tab Bar: Conversations + Global Feed -->
+            <div id="tab-bar">
+                <button class="tab active" data-tab="chat">💬 Chat</button>
+                <button class="tab" data-tab="feed">🌐 Global Feed</button>
+            </div>
+
+            <!-- Chat View -->
+            <div id="chat-view" class="tab-content active">
+                <div id="chat-header">
+                    <span id="chat-recipient">Select an agent to chat</span>
+                    <span id="chat-status"></span>
+                </div>
+                <div id="messages" class="messages"></div>
+                <div id="chat-input-area">
+                    <input type="text" id="chat-input" placeholder="Type a message..." disabled>
+                    <button id="btn-send" disabled>Send</button>
+                </div>
+            </div>
+
+            <!-- Global Feed View -->
+            <div id="feed-view" class="tab-content">
+                <div id="feed-messages" class="messages"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>

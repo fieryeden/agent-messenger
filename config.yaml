@@ -1,0 +1,19 @@
+server:
+  host: "0.0.0.0"
+  port: 8096
+  cors_origins:
+    - "*"
+
+database:
+  path: "./data/messenger.db"
+
+auth:
+  enabled: false
+  api_keys: []
+  # To enable auth:
+  # enabled: true
+  # api_keys:
+  #   - "your-secret-key-here"
+
+dashboard:
+  enabled: true

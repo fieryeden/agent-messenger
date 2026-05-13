@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Messenger Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/.openclaw/workspace/autoresearchclaw/projects/agent-messenger
+ExecStart=/root/.openclaw/workspace/autoresearchclaw/projects/agent-messenger/venv/bin/python -m server.main
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
