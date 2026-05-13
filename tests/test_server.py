@@ -181,7 +181,7 @@ class TestRESTAPI:
         resp = await client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "ok"
+        assert data["status"] == "healthy"
 
     @pytest.mark.asyncio
     async def test_register_and_list_agents(self, client):
@@ -237,7 +237,7 @@ class TestRESTAPI:
     async def test_send_message_invalid_conversation(self, client):
         await client.post("/api/agents/register", json={"id": "z", "name": "Z"})
         resp = await client.post("/api/messages", json={
-            "conversation_id": "nonexistent", "sender_id": "z", "content": "Oops"
+            "conversation_id": "00000000-0000-0000-0000-000000000000", "sender_id": "z", "content": "Oops"
         })
         assert resp.status_code == 404
 

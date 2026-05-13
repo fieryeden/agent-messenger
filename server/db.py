@@ -1,4 +1,4 @@
-"""Database layer for Agent Messenger — SQLite persistence."""
+"""Database layer for Agent Messenger — SQLite persistence with LIKE injection protection."""
 
 import json
 import sqlite3
@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from server.security import sanitize_sql_like
 
 
 def _now() -> str:
@@ -25,46 +27,51 @@ class MessengerDB:
     def _init_tables(self):
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS agents (
-                id          TEXT PRIMARY KEY,
-                name        TEXT NOT NULL,
-                type        TEXT DEFAULT 'detached',
-                status      TEXT DEFAULT 'offline',
-                metadata    TEXT DEFAULT '{}',
-                created_at  TEXT NOT NULL,
-                last_seen   TEXT NOT NULL
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT DEFAULT 'detached',
+                status TEXT DEFAULT 'offline',
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                last_seen TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS conversations (
-                id          TEXT PRIMARY KEY,
-                type        TEXT DEFAULT 'dm',
-                name        TEXT,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
+                id TEXT PRIMARY KEY,
+                type TEXT DEFAULT 'dm',
+                name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS conversation_members (
-                conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                agent_id         TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-                role             TEXT DEFAULT 'member',
-                joined_at        TEXT NOT NULL,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                role TEXT DEFAULT 'member',
+                joined_at TEXT NOT NULL,
                 PRIMARY KEY (conversation_id, agent_id)
             );
-
             CREATE TABLE IF NOT EXISTS messages (
-                id              TEXT PRIMARY KEY,
+                id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                sender_id       TEXT NOT NULL REFERENCES agents(id),
-                content         TEXT NOT NULL,
-                type            TEXT DEFAULT 'text',
-                metadata        TEXT DEFAULT '{}',
-                created_at      TEXT NOT NULL,
-                read_by         TEXT DEFAULT '[]'
+                sender_id TEXT NOT NULL REFERENCES agents(id),
+                content TEXT NOT NULL,
+                type TEXT DEFAULT 'text',
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                read_by TEXT DEFAULT '[]'
             );
-
+            CREATE TABLE IF NOT EXISTS typing_indicators (
+                conversation_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                PRIMARY KEY (conversation_id, agent_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_msgs_conv ON messages(conversation_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_msgs_sender ON messages(sender_id);
             CREATE INDEX IF NOT EXISTS idx_conv_members ON conversation_members(agent_id);
             CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+            CREATE INDEX IF NOT EXISTS idx_agents_type ON agents(type);
+            CREATE INDEX IF NOT EXISTS idx_conv_type ON conversations(type);
+            CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
         """)
         self.conn.commit()
 
@@ -86,11 +93,20 @@ class MessengerDB:
         row = self.conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
         return self._agent_row(row) if row else None
 
-    def list_agents(self, status: Optional[str] = None) -> list[dict]:
+    def list_agents(self, status: Optional[str] = None, agent_type: Optional[str] = None, limit: int = 100, offset: int = 0) -> list[dict]:
+        conditions = []
+        params = []
         if status:
-            rows = self.conn.execute("SELECT * FROM agents WHERE status = ? ORDER BY name", (status,)).fetchall()
-        else:
-            rows = self.conn.execute("SELECT * FROM agents ORDER BY name").fetchall()
+            conditions.append("status = ?")
+            params.append(status)
+        if agent_type:
+            conditions.append("type = ?")
+            params.append(agent_type)
+        where = " AND ".join(conditions) if conditions else "1=1"
+        rows = self.conn.execute(
+            f"SELECT * FROM agents WHERE {where} ORDER BY name LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
         return [self._agent_row(r) for r in rows]
 
     def update_agent_status(self, agent_id: str, status: str):
@@ -99,6 +115,12 @@ class MessengerDB:
             (status, _now(), agent_id),
         )
         self.conn.commit()
+
+    def delete_agent(self, agent_id: str) -> bool:
+        c = self.conn.cursor()
+        c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        self.conn.commit()
+        return c.rowcount > 0
 
     # ── Conversations ──
 
@@ -121,14 +143,12 @@ class MessengerDB:
             "INSERT INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
             (conv_id, conversation_type, name, now, now),
         )
-
         if member_ids:
             for mid in member_ids:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO conversation_members (conversation_id, agent_id, role, joined_at) VALUES (?, ?, 'member', ?)",
                     (conv_id, mid, now),
                 )
-
         self.conn.commit()
         return self._conv_row(self.conn.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,)).fetchone())
 
@@ -144,13 +164,13 @@ class MessengerDB:
         result["members"] = [dict(m) for m in members]
         return result
 
-    def list_conversations(self, agent_id: str) -> list[dict]:
+    def list_conversations(self, agent_id: str, limit: int = 50, offset: int = 0) -> list[dict]:
         rows = self.conn.execute("""
             SELECT c.* FROM conversations c
             JOIN conversation_members cm ON c.id = cm.conversation_id
             WHERE cm.agent_id = ?
-            ORDER BY c.updated_at DESC
-        """, (agent_id,)).fetchall()
+            ORDER BY c.updated_at DESC LIMIT ? OFFSET ?
+        """, (agent_id, limit, offset)).fetchall()
         results = []
         for row in rows:
             conv = self._conv_row(row)
@@ -165,6 +185,13 @@ class MessengerDB:
                 (conv["id"],),
             ).fetchone()
             conv["last_message"] = self._msg_row(last_msg) if last_msg else None
+            # Unread count
+            unread = self.conn.execute(
+                """SELECT COUNT(*) FROM messages
+                   WHERE conversation_id = ? AND ? NOT IN (SELECT value FROM json_each(read_by))""",
+                (conv["id"], agent_id),
+            ).fetchone()[0]
+            conv["unread_count"] = unread
             results.append(conv)
         return results
 
@@ -188,7 +215,6 @@ class MessengerDB:
         msg_id = str(uuid.uuid4())
         now = _now()
         meta_json = json.dumps(metadata or {})
-
         self.conn.execute(
             """INSERT INTO messages (id, conversation_id, sender_id, content, type, metadata, created_at, read_by)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -196,12 +222,9 @@ class MessengerDB:
         )
         # Update conversation timestamp
         self.conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
-        self.conn.commit()
-
         # Update sender's last_seen
         self.conn.execute("UPDATE agents SET last_seen = ? WHERE id = ?", (now, sender_id))
         self.conn.commit()
-
         return self.get_message(msg_id)
 
     def get_message(self, msg_id: str) -> Optional[dict]:
@@ -223,6 +246,12 @@ class MessengerDB:
             ).fetchall()
         return [self._msg_row(r) for r in reversed(rows)]
 
+    def delete_message(self, msg_id: str) -> bool:
+        c = self.conn.cursor()
+        c.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
+        self.conn.commit()
+        return c.rowcount > 0
+
     def mark_read(self, msg_id: str, agent_id: str):
         msg = self.get_message(msg_id)
         if not msg:
@@ -235,21 +264,79 @@ class MessengerDB:
         )
         self.conn.commit()
 
-    def search_messages(self, query: str, limit: int = 20) -> list[dict]:
+    def mark_conversation_read(self, conversation_id: str, agent_id: str):
+        """Mark all messages in a conversation as read by an agent."""
+        msgs = self.conn.execute(
+            "SELECT id, read_by FROM messages WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+        for msg in msgs:
+            try:
+                read_by = set(json.loads(msg["read_by"]))
+            except (json.JSONDecodeError, TypeError):
+                read_by = set()
+            read_by.add(agent_id)
+            self.conn.execute(
+                "UPDATE messages SET read_by = ? WHERE id = ?",
+                (json.dumps(list(read_by)), msg["id"]),
+            )
+        self.conn.commit()
+
+    def search_messages(self, query: str, limit: int = 20, offset: int = 0) -> list[dict]:
+        """Search messages with proper LIKE escaping."""
+        safe_query = sanitize_sql_like(query)
         rows = self.conn.execute(
-            """SELECT * FROM messages WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?""",
-            (f"%{query}%", limit),
+            """SELECT * FROM messages WHERE content LIKE ? ESCAPE '\\'
+               ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+            (f"%{safe_query}%", limit, offset),
         ).fetchall()
         return [self._msg_row(r) for r in rows]
 
+    # ── Typing Indicators ──
+
+    def set_typing(self, conversation_id: str, agent_id: str):
+        """Set typing indicator for an agent in a conversation."""
+        now = _now()
+        self.conn.execute(
+            """INSERT INTO typing_indicators (conversation_id, agent_id, started_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(conversation_id, agent_id) DO UPDATE SET started_at=?""",
+            (conversation_id, agent_id, now, now),
+        )
+        self.conn.commit()
+
+    def clear_typing(self, conversation_id: str, agent_id: str):
+        """Clear typing indicator."""
+        self.conn.execute(
+            "DELETE FROM typing_indicators WHERE conversation_id = ? AND agent_id = ?",
+            (conversation_id, agent_id),
+        )
+        self.conn.commit()
+
+    def get_typing(self, conversation_id: str) -> list[dict]:
+        """Get who's currently typing in a conversation."""
+        rows = self.conn.execute(
+            "SELECT agent_id, started_at FROM typing_indicators WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_typing_all(self, agent_id: str):
+        """Clear all typing indicators for an agent (used on disconnect)."""
+        self.conn.execute(
+            "DELETE FROM typing_indicators WHERE agent_id = ?",
+            (agent_id,),
+        )
+        self.conn.commit()
+
     # ── Global feed ──
 
-    def global_feed(self, limit: int = 100) -> list[dict]:
+    def global_feed(self, limit: int = 100, offset: int = 0) -> list[dict]:
         rows = self.conn.execute(
             """SELECT m.*, a.name as sender_name FROM messages m
                JOIN agents a ON m.sender_id = a.id
-               ORDER BY m.created_at DESC LIMIT ?""",
-            (limit,),
+               ORDER BY m.created_at DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
         ).fetchall()
         return [self._msg_row(r) for r in rows]
 
@@ -260,7 +347,16 @@ class MessengerDB:
         online = self.conn.execute("SELECT COUNT(*) FROM agents WHERE status = 'online'").fetchone()[0]
         convs = self.conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         msgs = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        return {"agents": agents, "online": online, "conversations": convs, "messages": msgs}
+        dms = self.conn.execute("SELECT COUNT(*) FROM conversations WHERE type = 'dm'").fetchone()[0]
+        groups = self.conn.execute("SELECT COUNT(*) FROM conversations WHERE type = 'group'").fetchone()[0]
+        return {
+            "agents": agents,
+            "online": online,
+            "conversations": convs,
+            "dms": dms,
+            "groups": groups,
+            "messages": msgs,
+        }
 
     # ── Helpers ──
 
