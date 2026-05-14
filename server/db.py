@@ -1,6 +1,7 @@
-"""Database layer for Agent Messenger — SQLite persistence with LIKE injection protection."""
+"""Database layer for Agent Messenger — SQLite persistence with migrations, auth support, and LIKE injection protection."""
 
 import json
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Optional
 
 from server.security import sanitize_sql_like
+
+logger = logging.getLogger("agent-messenger.db")
 
 
 def _now() -> str:
@@ -18,11 +21,12 @@ class MessengerDB:
     def __init__(self, db_path: str):
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_tables()
+        self._migrate()
 
     def _init_tables(self):
         self.conn.executescript("""
@@ -32,6 +36,8 @@ class MessengerDB:
                 type TEXT DEFAULT 'detached',
                 status TEXT DEFAULT 'offline',
                 metadata TEXT DEFAULT '{}',
+                api_key_hash TEXT,
+                api_key_scopes TEXT DEFAULT '["agent"]',
                 created_at TEXT NOT NULL,
                 last_seen TEXT NOT NULL
             );
@@ -65,6 +71,10 @@ class MessengerDB:
                 started_at TEXT NOT NULL,
                 PRIMARY KEY (conversation_id, agent_id)
             );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_msgs_conv ON messages(conversation_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_msgs_sender ON messages(sender_id);
             CREATE INDEX IF NOT EXISTS idx_conv_members ON conversation_members(agent_id);
@@ -74,6 +84,45 @@ class MessengerDB:
             CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
         """)
         self.conn.commit()
+
+    def _migrate(self):
+        """Run schema migrations for existing databases."""
+        # Check current version
+        row = self.conn.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone()
+        current = row[0] if row[0] is not None else 0
+
+        migrations = [
+            # (version, description, sql)
+            (1, "add_api_key_columns", [
+                "ALTER TABLE agents ADD COLUMN api_key_hash TEXT",
+                "ALTER TABLE agents ADD COLUMN api_key_scopes TEXT DEFAULT '[\"agent\"]'",
+            ]),
+        ]
+
+        for version, desc, sqls in migrations:
+            if current >= version:
+                continue
+            try:
+                for sql in sqls:
+                    self.conn.execute(sql)
+                self.conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                    (version, _now()),
+                )
+                self.conn.commit()
+                logger.info("Migration v%d (%s) applied", version, desc)
+            except Exception as e:
+                # Column already exists = already migrated
+                if "duplicate column" in str(e).lower():
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                        (version, _now()),
+                    )
+                    self.conn.commit()
+                else:
+                    logger.error("Migration v%d failed: %s", version, e)
 
     # ── Agents ──
 
@@ -92,6 +141,19 @@ class MessengerDB:
     def get_agent(self, agent_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
         return self._agent_row(row) if row else None
+
+    def get_agent_by_api_key(self, hashed_key: str) -> Optional[dict]:
+        """Look up an agent by their API key hash."""
+        row = self.conn.execute("SELECT * FROM agents WHERE api_key_hash = ?", (hashed_key,)).fetchone()
+        return self._agent_row(row) if row else None
+
+    def set_agent_api_key(self, agent_id: str, hashed_key: str, scopes: list[str]):
+        """Set the API key hash and scopes for an agent."""
+        self.conn.execute(
+            "UPDATE agents SET api_key_hash = ?, api_key_scopes = ? WHERE id = ?",
+            (hashed_key, json.dumps(scopes), agent_id),
+        )
+        self.conn.commit()
 
     def list_agents(self, status: Optional[str] = None, agent_type: Optional[str] = None, limit: int = 100, offset: int = 0) -> list[dict]:
         conditions = []
@@ -127,7 +189,6 @@ class MessengerDB:
     def create_conversation(self, conversation_type: str = "dm", name: Optional[str] = None, member_ids: list[str] = None) -> dict:
         conv_id = str(uuid.uuid4())
         now = _now()
-
         # For DMs between 2 agents, check if conversation already exists
         if conversation_type == "dm" and member_ids and len(member_ids) == 2:
             existing = self.conn.execute("""
@@ -295,18 +356,15 @@ class MessengerDB:
     # ── Typing Indicators ──
 
     def set_typing(self, conversation_id: str, agent_id: str):
-        """Set typing indicator for an agent in a conversation."""
         now = _now()
         self.conn.execute(
-            """INSERT INTO typing_indicators (conversation_id, agent_id, started_at)
-               VALUES (?, ?, ?)
+            """INSERT INTO typing_indicators (conversation_id, agent_id, started_at) VALUES (?, ?, ?)
                ON CONFLICT(conversation_id, agent_id) DO UPDATE SET started_at=?""",
             (conversation_id, agent_id, now, now),
         )
         self.conn.commit()
 
     def clear_typing(self, conversation_id: str, agent_id: str):
-        """Clear typing indicator."""
         self.conn.execute(
             "DELETE FROM typing_indicators WHERE conversation_id = ? AND agent_id = ?",
             (conversation_id, agent_id),
@@ -314,7 +372,6 @@ class MessengerDB:
         self.conn.commit()
 
     def get_typing(self, conversation_id: str) -> list[dict]:
-        """Get who's currently typing in a conversation."""
         rows = self.conn.execute(
             "SELECT agent_id, started_at FROM typing_indicators WHERE conversation_id = ?",
             (conversation_id,),
@@ -322,7 +379,6 @@ class MessengerDB:
         return [dict(r) for r in rows]
 
     def clear_typing_all(self, agent_id: str):
-        """Clear all typing indicators for an agent (used on disconnect)."""
         self.conn.execute(
             "DELETE FROM typing_indicators WHERE agent_id = ?",
             (agent_id,),
@@ -333,8 +389,8 @@ class MessengerDB:
 
     def global_feed(self, limit: int = 100, offset: int = 0) -> list[dict]:
         rows = self.conn.execute(
-            """SELECT m.*, a.name as sender_name FROM messages m
-               JOIN agents a ON m.sender_id = a.id
+            """SELECT m.*, a.name as sender_name
+               FROM messages m JOIN agents a ON m.sender_id = a.id
                ORDER BY m.created_at DESC LIMIT ? OFFSET ?""",
             (limit, offset),
         ).fetchall()
@@ -366,6 +422,12 @@ class MessengerDB:
             d["metadata"] = json.loads(d.get("metadata", "{}"))
         except (json.JSONDecodeError, TypeError):
             d["metadata"] = {}
+        # Ensure auth fields exist even for pre-migration rows
+        d.setdefault("api_key_hash", None)
+        try:
+            d["api_key_scopes"] = json.loads(d.get("api_key_scopes", '["agent"]'))
+        except (json.JSONDecodeError, TypeError):
+            d["api_key_scopes"] = ["agent"]
         return d
 
     def _conv_row(self, row) -> dict:

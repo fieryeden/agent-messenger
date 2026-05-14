@@ -8,6 +8,10 @@ from typing import Optional
 from server.db_accessor import get_db
 from server.security import sanitize_agent_id, sanitize_string, sanitize_uuid
 
+
+class MarkRead(BaseModel):
+    agent_id: str = Field(..., min_length=1, max_length=128)
+
 logger = logging.getLogger("agent-messenger.conversations")
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -111,11 +115,11 @@ async def remove_member(conv_id: str, agent_id: str):
 
 
 @router.post("/{conv_id}/read")
-async def mark_conversation_read(conv_id: str, body: dict):
+async def mark_conversation_read(conv_id: str, body: MarkRead):
     """Mark all messages in a conversation as read by an agent."""
     try:
         safe_conv = sanitize_uuid(conv_id)
-        safe_agent = sanitize_agent_id(body.get("agent_id", ""))
+        safe_agent = sanitize_agent_id(body.agent_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
@@ -123,5 +127,5 @@ async def mark_conversation_read(conv_id: str, body: dict):
         db.mark_conversation_read(safe_conv, safe_agent)
         return {"status": "ok"}
     except Exception as e:
-        logger.error("Failed to mark read for %s in %s: %s", body.get("agent_id"), conv_id, e)
+        logger.error("Failed to mark read for %s in %s: %s", body.agent_id, conv_id, e)
         raise HTTPException(status_code=400, detail=str(e))

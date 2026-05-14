@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  messenger:
+    build: .
+    container_name: agent-messenger
+    restart: unless-stopped
+    ports:
+      - "${MESSENGER_PORT:-8096}:8096"
+    environment:
+      - MESSENGER_JWT_SECRET=${MESSENGER_JWT_SECRET:?JWT_SECRET is required}
+      - MESSENGER_JWT_ACCESS_EXPIRY=${MESSENGER_JWT_ACCESS_EXPIRY:-900}
+      - MESSENGER_JWT_REFRESH_EXPIRY=${MESSENGER_JWT_REFRESH_EXPIRY:-604800}
+      - MESSENGER_AUTH_ENABLED=${MESSENGER_AUTH_ENABLED:-false}
+      - MESSENGER_CORS_ORIGINS=${MESSENGER_CORS_ORIGINS:-*}
+    volumes:
+      - messenger_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8096/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  messenger_data:

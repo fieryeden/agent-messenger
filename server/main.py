@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from server.db import MessengerDB
 from server.db_accessor import get_db, set_db
 from server.routes import agents as agent_routes
+from server.routes import auth as auth_routes
 from server.routes import conversations as conv_routes
 from server.routes import messages as msg_routes
 from server.security import (
@@ -64,6 +65,7 @@ def load_config(config_path="config.yaml") -> dict:
         base = _default_config()
         _deep_merge(base, config_path)
         return base
+
     config = _default_config()
     if isinstance(config_path, (str, os.PathLike)) and os.path.exists(config_path):
         with open(config_path) as f:
@@ -94,8 +96,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     app = FastAPI(
         title="Agent Messenger",
-        version="0.2.0",
-        description="Inter-agent communication platform with real-time messaging and dashboard",
+        version="0.3.0",
+        description="Inter-agent communication platform with JWT auth, real-time messaging, and dashboard",
     )
 
     # CORS
@@ -124,32 +126,75 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     # ── Auth + Rate Limiting Middleware ──
     @app.middleware("http")
     async def auth_and_rate_limit(request: Request, call_next):
-        # Skip for health/ready endpoints
-        if request.url.path in ("/health", "/ready", "/metrics"):
-            return await call_next(request)
+        # Skip auth for health/ready/metrics/docs/static endpoints
+        skip_auth_paths = ("/health", "/ready", "/metrics", "/docs", "/openapi.json", "/redoc")
+        is_skip_path = any(request.url.path.startswith(p) for p in skip_auth_paths) or request.url.path == "/"
 
-        # Rate limiting
+        # Rate limiting (always active)
         client_key = request.client.host if request.client else "unknown"
         agent_header = request.headers.get("X-Agent-ID", "")
         if agent_header:
             client_key = f"agent:{agent_header}"
-
         if not rate_limiter.is_allowed(client_key):
             return JSONResponse(
                 status_code=429,
                 content={"detail": "Rate limit exceeded", "retry_after_seconds": 60},
             )
 
-        # Auth check
+        if is_skip_path:
+            return await call_next(request)
+
+        # Auth check — when enabled, all /api/ routes require valid JWT or API key
+        # Exception: /api/v1/auth/login and /api/v1/auth/refresh (public)
         if config.get("auth", {}).get("enabled", False):
-            api_keys = config["auth"].get("api_keys", [])
-            if api_keys:
+            public_paths = (
+                "/api/v1/auth/login", "/api/v1/auth/refresh",
+                "/api/auth/login", "/api/auth/refresh",
+            )
+            if request.url.path not in public_paths and request.url.path.startswith("/api"):
+                from server.auth import _jwt_decode, _hash_api_key
+
                 auth_header = request.headers.get("Authorization", "")
                 if not auth_header.startswith("Bearer "):
-                    return JSONResponse(status_code=401, content={"detail": "Missing or invalid auth token"})
+                    return JSONResponse(status_code=401, content={"detail": "Authorization required"})
                 token = auth_header[7:]
-                if token not in api_keys:
-                    return JSONResponse(status_code=403, content={"detail": "Invalid API key"})
+
+                identity = None
+                # Try JWT first
+                payload = _jwt_decode(token)
+                if payload and payload.get("type") == "access":
+                    identity = {
+                        "agent_id": payload["sub"],
+                        "scopes": payload.get("scopes", ["agent"]),
+                        "auth_type": "jwt",
+                    }
+
+                # Try API key
+                if not identity and token.startswith("am_"):
+                    hashed = _hash_api_key(token)
+                    agent = db.get_agent_by_api_key(hashed)
+                    if agent:
+                        identity = {
+                            "agent_id": agent["id"],
+                            "scopes": agent.get("api_key_scopes", ["agent"]),
+                            "auth_type": "api_key",
+                        }
+
+                # Fallback: static API keys from config (backward compat)
+                if not identity:
+                    config_api_keys = config.get("auth", {}).get("api_keys", [])
+                    if config_api_keys and token in config_api_keys:
+                        identity = {
+                            "agent_id": "config-api-user",
+                            "scopes": ["agent", "admin"],
+                            "auth_type": "config_api_key",
+                        }
+
+                if not identity:
+                    return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
+
+                # Store identity on request state for downstream access
+                request.state.auth_identity = identity
 
         response = await call_next(request)
         return response
@@ -167,8 +212,9 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     async def health():
         return {
             "status": "healthy",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "ws_connections": len(ws_manager.active),
+            "auth_enabled": config.get("auth", {}).get("enabled", False),
         }
 
     @app.get("/ready")
@@ -186,16 +232,25 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         return {
             "stats": db.stats(),
             "ws_connections": len(ws_manager.active),
+            "auth_enabled": config.get("auth", {}).get("enabled", False),
             "ws_online_agents": ws_manager.online_agents,
         }
 
-    # ── REST Routes ──
+    # ── REST Routes (v1 API + backward compat) ──
+    v1_prefix = "/api/v1"
+    app.include_router(auth_routes.router, prefix=v1_prefix)
+    app.include_router(agent_routes.router, prefix=v1_prefix)
+    app.include_router(conv_routes.router, prefix=v1_prefix)
+    app.include_router(msg_routes.router, prefix=v1_prefix)
+
+    # Backward-compat unversioned mount
+    app.include_router(auth_routes.router, prefix="/api")
     app.include_router(agent_routes.router, prefix="/api")
     app.include_router(conv_routes.router, prefix="/api")
     app.include_router(msg_routes.router, prefix="/api")
 
     # ── Audit API ──
-    @app.get("/api/audit")
+    @app.get("/api/v1/audit")
     async def query_audit(agent_id: str = None, action: str = None, since: str = None, limit: int = 100):
         if not audit:
             return JSONResponse(status_code=404, content={"detail": "Audit logging disabled"})
@@ -204,11 +259,20 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         entries = audit.query(agent_id=safe_agent, action=safe_action, since=since, limit=limit)
         return {"status": "ok", "entries": entries, "count": len(entries)}
 
-    @app.get("/api/audit/stats")
+    @app.get("/api/v1/audit/stats")
     async def audit_stats():
         if not audit:
             return JSONResponse(status_code=404, content={"detail": "Audit logging disabled"})
         return {"status": "ok", "stats": audit.stats()}
+
+    # Legacy audit paths (backward compat)
+    @app.get("/api/audit")
+    async def query_audit_legacy(agent_id: str = None, action: str = None, since: str = None, limit: int = 100):
+        return await query_audit(agent_id, action, since, limit)
+
+    @app.get("/api/audit/stats")
+    async def audit_stats_legacy():
+        return await audit_stats()
 
     # ── WebSocket ──
     @app.websocket("/ws/{agent_id}")
@@ -241,7 +305,6 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             "agent_id": safe_agent,
             "status": "online",
         }, exclude=safe_agent)
-
         if audit:
             audit.log("ws_connect", agent_id=safe_agent)
 
@@ -342,9 +405,9 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         async def dashboard():
             return _dashboard_html()
 
-    @app.get("/", response_class=HTMLResponse)
-    async def root():
-        return _dashboard_html()
+        @app.get("/", response_class=HTMLResponse)
+        async def root():
+            return _dashboard_html()
 
     # ── Graceful Shutdown ──
     shutdown_handler = GracefulShutdown(shutdown_callback=lambda: _cleanup())
@@ -418,80 +481,28 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
 </style></head><body>
 <div class="header"><h1>📡 Agent Messenger</h1><span class="status" id="connStatus">Connecting...</span></div>
 <div class="main">
-  <div class="sidebar">
-    <div class="sidebar-header">AGENTS</div>
-    <div class="agent-list" id="agentList"></div>
-    <div class="stats-bar" id="statsBar"></div>
-  </div>
-  <div class="chat-area">
-    <div class="chat-header"><h2 id="chatTitle">Select an agent</h2></div>
-    <div class="messages" id="messageArea"><div class="empty-state">Select an agent to start chatting</div></div>
-  </div>
-  <div class="feed-area">
-    <div class="feed-header">GLOBAL FEED</div>
-    <div class="feed-content" id="feedContent"></div>
-  </div>
+<div class="sidebar">
+<div class="sidebar-header">AGENTS</div>
+<div class="agent-list" id="agentList"></div>
+<div class="stats-bar" id="statsBar"></div>
+</div>
+<div class="chat-area">
+<div class="chat-header"><h2 id="chatTitle">Select an agent</h2></div>
+<div class="messages" id="messageArea"><div class="empty-state">Select an agent to start chatting</div></div>
+</div>
+<div class="feed-area">
+<div class="feed-header">GLOBAL FEED</div>
+<div class="feed-content" id="feedContent"></div>
+</div>
 </div>
 <script>
-const API='/api';
-let agents=[],selectedAgent=null,ws=null;
-
-async function loadAgents(){
-  const r=await fetch(API+'/agents');const d=await r.json();
-  agents=d.agents||[];renderAgents();
-}
-async function loadFeed(){
-  const r=await fetch(API+'/messages/feed?limit=50');const d=await r.json();
-  const feed=d.messages||d.results||[];
-  document.getElementById('feedContent').innerHTML=feed.map(m=>
-    '<div class="feed-item"><span class="from">'+(m.sender_name||m.sender_id)+'</span><div class="text">'+m.content+'</div><div class="time">'+m.created_at+'</div></div>'
-  ).join('');
-}
-async function loadStats(){
-  const r=await fetch('/metrics');const d=await r.json();
-  const s=d.stats||{};
-  document.getElementById('statsBar').innerHTML=
-    '<span>Agents: <span class="stat-value">'+s.agents+'</span></span>'+
-    '<span>Online: <span class="stat-value">'+s.online+'</span></span>'+
-    '<span>Messages: <span class="stat-value">'+s.messages+'</span></span>';
-}
-function renderAgents(){
-  document.getElementById('agentList').innerHTML=agents.map(a=>
-    '<div class="agent-item'+(selectedAgent===a.id?' active':'')+'" onclick="selectAgent(\''+a.id+'\')">'+
-    '<div class="agent-dot '+a.status+'"></div>'+
-    '<span class="agent-name">'+a.name+'</span>'+
-    '<span class="agent-type">'+a.type+'</span></div>'
-  ).join('');
-}
-async function selectAgent(id){
-  selectedAgent=id;
-  const agent=agents.find(a=>a.id===id);
-  document.getElementById('chatTitle').textContent=agent?agent.name:id;
-  renderAgents();
-  const r=await fetch(API+'/conversations?agent_id='+id);
-  const d=await r.json();
-  const convs=d.conversations||[];
-  if(convs.length>0){
-    const conv=convs[0];
-    const mr=await fetch(API+'/messages/conversation/'+conv.id+'?limit=50');
-    const md=await mr.json();
-    const msgs=md.messages||[];
-    document.getElementById('messageArea').innerHTML=msgs.map(m=>
-      '<div class="msg"><div class="msg-sender">'+m.sender_id+'</div>'+
-      '<div class="msg-content">'+m.content+'</div>'+
-      '<div class="msg-time">'+m.created_at+'</div></div>'
-    ).join('')||'<div class="empty-state">No messages yet</div>';
-  }else{
-    document.getElementById('messageArea').innerHTML='<div class="empty-state">No conversations yet</div>';
-  }
-}
-function connectWS(){
-  const proto=location.protocol==='https:'?'wss':'ws';
-  ws=new WebSocket(proto+'://'+location.host+'/ws/dashboard-viewer');
-  ws.onopen=()=>{document.getElementById('connStatus').textContent='Connected ●';document.getElementById('connStatus').style.color='#3fb950'};
-  ws.onmessage=(e)=>{const d=JSON.parse(e.data);if(d.type==='agent_status')loadAgents();if(d.type==='new_message')loadFeed();if(selectedAgent)selectAgent(selectedAgent)};
-  ws.onclose=()=>{document.getElementById('connStatus').textContent='Disconnected ○';document.getElementById('connStatus').style.color='#f85149';setTimeout(connectWS,3000)};
-}
+const API='/api';let agents=[],selectedAgent=null,ws=null;
+async function loadAgents(){const r=await fetch(API+'/agents');const d=await r.json();agents=d.agents||[];renderAgents();}
+async function loadFeed(){const r=await fetch(API+'/messages/feed?limit=50');const d=await r.json();const feed=d.messages||d.results||[];document.getElementById('feedContent').innerHTML=feed.map(m=>'<div class="feed-item"><span class="from">'+(m.sender_name||m.sender_id)+'</span><div class="text">'+m.content+'</div><div class="time">'+m.created_at+'</div></div>').join('');}
+async function loadStats(){const r=await fetch('/metrics');const d=await r.json();const s=d.stats||{};document.getElementById('statsBar').innerHTML='<span>Agents: <span class="stat-value">'+s.agents+'</span></span>'+'<span>Online: <span class="stat-value">'+s.online+'</span></span>'+'<span>Messages: <span class="stat-value">'+s.messages+'</span></span>';}
+function renderAgents(){document.getElementById('agentList').innerHTML=agents.map(a=>'<div class="agent-item'+(selectedAgent===a.id?' active':'')+'" onclick="selectAgent(\''+a.id+'\')">'+'<div class="agent-dot '+a.status+'"></div>'+'<span class="agent-name">'+a.name+'</span>'+'<span class="agent-type">'+a.type+'</span></div>').join('');}
+async function selectAgent(id){selectedAgent=id;const agent=agents.find(a=>a.id===id);document.getElementById('chatTitle').textContent=agent?agent.name:id;renderAgents();const r=await fetch(API+'/conversations?agent_id='+id);const d=await r.json();const convs=d.conversations||[];if(convs.length>0){const conv=convs[0];const mr=await fetch(API+'/messages/conversation/'+conv.id+'?limit=50');const md=await mr.json();const msgs=md.messages||[];document.getElementById('messageArea').innerHTML=msgs.map(m=>'<div class="msg"><div class="msg-sender">'+m.sender_id+'</div>'+'<div class="msg-content">'+m.content+'</div>'+'<div class="msg-time">'+m.created_at+'</div></div>').join('')||'<div class="empty-state">No messages yet</div>';}else{document.getElementById('messageArea').innerHTML='<div class="empty-state">No conversations yet</div>';}}
+function connectWS(){const proto=location.protocol==='https:'?'wss':'ws';ws=new WebSocket(proto+'://'+location.host+'/ws/dashboard-viewer');ws.onopen=()=>{document.getElementById('connStatus').textContent='Connected ●';document.getElementById('connStatus').style.color='#3fb950'};ws.onmessage=(e)=>{const d=JSON.parse(e.data);if(d.type==='agent_status')loadAgents();if(d.type==='new_message')loadFeed();if(selectedAgent)selectAgent(selectedAgent)};ws.onclose=()=>{document.getElementById('connStatus').textContent='Disconnected ○';document.getElementById('connStatus').style.color='#f85149';setTimeout(connectWS,3000)};}
 async function init(){await loadAgents();await loadFeed();await loadStats();connectWS()}
 init();setInterval(()=>{loadAgents();loadStats()},30000);
 </script></body></html>"""
@@ -505,7 +516,6 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-
     cfg = load_config(args.config)
     host = args.host or cfg["server"]["host"]
     port = args.port or cfg["server"]["port"]
