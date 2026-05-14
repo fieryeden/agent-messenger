@@ -1,6 +1,7 @@
 """Tests for Agent Messenger Server — DB layer, REST routes, WebSocket, and auth."""
 
 import json
+from datetime import datetime, timezone, timedelta
 import pytest
 import asyncio
 
@@ -605,3 +606,202 @@ class TestAgentCapabilities:
 
         coders = db.find_agents_by_capability("coding")
         assert len(coders) == 1
+
+
+class TestFileAttachments:
+    """v0.5.0 Feature 1: File upload/download/delete."""
+
+    def test_store_file(self, db):
+        db.register_agent("a1", "Uploader")
+        conv = db.create_conversation("file-conv", "File Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "See attached")
+        f = db.store_file(msg["id"], "a1", "report.pdf", "application/pdf", 1024, "/tmp/report.pdf")
+        assert f["filename"] == "report.pdf"
+        assert f["size_bytes"] == 1024
+
+    def test_get_file(self, db):
+        db.register_agent("a1", "Uploader")
+        conv = db.create_conversation("fc2", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "msg")
+        f = db.store_file(msg["id"], "a1", "data.csv", "text/csv", 500, "/tmp/data.csv")
+        got = db.get_file(f["id"])
+        assert got["content_type"] == "text/csv"
+
+    def test_get_files_by_message(self, db):
+        db.register_agent("a1", "Uploader")
+        conv = db.create_conversation("fc3", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "msg")
+        db.store_file(msg["id"], "a1", "f1.txt", "text/plain", 10, "/tmp/f1")
+        db.store_file(msg["id"], "a1", "f2.txt", "text/plain", 20, "/tmp/f2")
+        files = db.get_files_by_message(msg["id"])
+        assert len(files) == 2
+
+    def test_delete_file(self, db):
+        db.register_agent("a1", "Uploader")
+        conv = db.create_conversation("fc4", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "msg")
+        f = db.store_file(msg["id"], "a1", "del.txt", "text/plain", 5, "/tmp/del")
+        assert db.delete_file(f["id"]) is True
+        assert db.get_file(f["id"]) is None
+
+    def test_cleanup_expired_files(self, db):
+        db.register_agent("a1", "Uploader")
+        conv = db.create_conversation("fc5", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "msg")
+        # expired 1 hour ago
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        f = db.store_file(msg["id"], "a1", "exp.txt", "text/plain", 5, "/tmp/exp", expires_at=past)
+        count = db.cleanup_expired_files()
+        assert count == 1
+        assert db.get_file(f["id"]) is None
+
+
+class TestPinnedMessages:
+    """v0.5.0 Feature 3: Pin/unpin messages."""
+
+    def test_pin_message(self, db):
+        db.register_agent("a1", "Pinner")
+        conv = db.create_conversation("pc1", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "Important!")
+        result = db.pin_message(conv["id"], msg["id"], "a1")
+        assert len(result) == 1
+        assert result[0]["message_id"] == msg["id"]
+
+    def test_unpin_message(self, db):
+        db.register_agent("a1", "Pinner")
+        conv = db.create_conversation("pc2", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "Important!")
+        db.pin_message(conv["id"], msg["id"], "a1")
+        assert db.unpin_message(conv["id"], msg["id"]) is True
+        assert len(db.get_pinned_messages(conv["id"])) == 0
+
+    def test_get_pinned_messages(self, db):
+        db.register_agent("a1", "Pinner")
+        conv = db.create_conversation("pc3", "Conv", ["a1"])
+        msg1 = db.send_message(conv["id"], "a1", "Pin me 1")
+        msg2 = db.send_message(conv["id"], "a1", "Pin me 2")
+        db.pin_message(conv["id"], msg1["id"], "a1")
+        db.pin_message(conv["id"], msg2["id"], "a1")
+        pinned = db.get_pinned_messages(conv["id"])
+        assert len(pinned) == 2
+
+    def test_duplicate_pin_ignored(self, db):
+        db.register_agent("a1", "Pinner")
+        conv = db.create_conversation("pc4", "Conv", ["a1"])
+        msg = db.send_message(conv["id"], "a1", "Once!")
+        db.pin_message(conv["id"], msg["id"], "a1")
+        db.pin_message(conv["id"], msg["id"], "a1")  # OR IGNORE
+        assert len(db.get_pinned_messages(conv["id"])) == 1
+
+
+class TestPolls:
+    """v0.5.0 Feature 4: Polls and voting."""
+
+    def test_create_poll(self, db):
+        db.register_agent("a1", "Pollster")
+        conv = db.create_conversation("plc1", "Conv", ["a1"])
+        poll = db.create_poll(conv["id"], "a1", "Best language?", ["Python", "Rust", "Go"])
+        assert poll["question"] == "Best language?"
+        assert len(poll["options"]) == 3
+        assert poll["vote_counts"] == [0, 0, 0]
+
+    def test_vote_poll(self, db):
+        db.register_agent("a1", "Pollster")
+        db.register_agent("a2", "Voter")
+        conv = db.create_conversation("plc2", "Conv", ["a1", "a2"])
+        poll = db.create_poll(conv["id"], "a1", "Pick one", ["A", "B"])
+        result = db.vote_poll(poll["id"], "a2", 1)
+        assert result["vote_counts"] == [0, 1]
+        assert result["total_votes"] == 1
+
+    def test_vote_poll_single_overwrite(self, db):
+        db.register_agent("a1", "Pollster")
+        db.register_agent("a2", "Voter")
+        conv = db.create_conversation("plc3", "Conv", ["a1", "a2"])
+        poll = db.create_poll(conv["id"], "a1", "Pick one", ["A", "B"])
+        db.vote_poll(poll["id"], "a2", 0)
+        result = db.vote_poll(poll["id"], "a2", 1)  # Overwrites
+        assert result["vote_counts"] == [0, 1]
+        assert result["total_votes"] == 1
+
+    def test_vote_poll_multi(self, db):
+        db.register_agent("a1", "Pollster")
+        db.register_agent("a2", "Voter")
+        conv = db.create_conversation("plc4", "Conv", ["a1", "a2"])
+        poll = db.create_poll(conv["id"], "a1", "Pick many", ["X", "Y", "Z"], multi_vote=True)
+        db.vote_poll(poll["id"], "a2", 0)
+        result = db.vote_poll(poll["id"], "a2", 2)
+        assert result["vote_counts"] == [1, 0, 1]
+        assert result["total_votes"] == 2
+
+    def test_close_poll(self, db):
+        db.register_agent("a1", "Pollster")
+        conv = db.create_conversation("plc5", "Conv", ["a1"])
+        poll = db.create_poll(conv["id"], "a1", "Done?", ["Yes", "No"])
+        result = db.close_poll(poll["id"])
+        assert result["closed_at"] is not None
+        # Can't vote after close
+        assert db.vote_poll(poll["id"], "a1", 0) is None
+
+    def test_list_polls(self, db):
+        db.register_agent("a1", "Pollster")
+        conv = db.create_conversation("plc6", "Conv", ["a1"])
+        db.create_poll(conv["id"], "a1", "Q1", ["A", "B"])
+        db.create_poll(conv["id"], "a1", "Q2", ["C", "D"])
+        active = db.list_polls(conv["id"])
+        assert len(active) == 2
+        # Close one
+        db.close_poll(active[0]["id"])
+        still_active = db.list_polls(conv["id"])
+        assert len(still_active) == 1
+        all_polls = db.list_polls(conv["id"], include_closed=True)
+        assert len(all_polls) == 2
+
+    def test_vote_invalid_option(self, db):
+        db.register_agent("a1", "Pollster")
+        conv = db.create_conversation("plc7", "Conv", ["a1"])
+        poll = db.create_poll(conv["id"], "a1", "Q", ["A", "B"])
+        assert db.vote_poll(poll["id"], "a1", 99) is None
+
+
+class TestFTS5Search:
+    """v0.5.0 Feature 2: FTS5 full-text search."""
+
+    def test_fts5_basic_search(self, db):
+        db.register_agent("a1", "Sender")
+        conv = db.create_conversation("sc1", "Conv", ["a1"])
+        db.send_message(conv["id"], "a1", "The quick brown fox jumps over the lazy dog")
+        db.send_message(conv["id"], "a1", "Hello world from agent messenger")
+        db.send_message(conv["id"], "a1", "Machine learning is transforming research")
+        db.rebuild_fts_index()
+        results = db.search_messages_fts("machine learning")
+        assert len(results) >= 1
+        assert "Machine learning" in results[0]["content"]
+
+    def test_fts5_with_conversation_filter(self, db):
+        db.register_agent("a1", "Sender")
+        conv1 = db.create_conversation("sc2a", "Conv1", ["a1"])
+        conv2 = db.create_conversation("sc2b", "Conv2", ["a1"])
+        db.send_message(conv1["id"], "a1", "unique keyword pineapple")
+        db.send_message(conv2["id"], "a1", "unique keyword pineapple")
+        db.rebuild_fts_index()
+        results = db.search_messages_fts("pineapple", conversation_id=conv1["id"])
+        assert len(results) == 1
+
+    def test_search_messages_fallback(self, db):
+        """search_messages should work even if FTS5 has issues."""
+        db.register_agent("a1", "Sender")
+        conv = db.create_conversation("sc3", "Conv", ["a1"])
+        db.send_message(conv["id"], "a1", "Findable content here")
+        db.rebuild_fts_index()
+        results = db.search_messages("Findable")
+        assert len(results) >= 1
+
+    def test_rebuild_fts_index(self, db):
+        db.register_agent("a1", "Sender")
+        conv = db.create_conversation("sc4", "Conv", ["a1"])
+        db.send_message(conv["id"], "a1", "indexed content")
+        # Rebuild should not raise
+        db.rebuild_fts_index()
+        results = db.search_messages_fts("indexed")
+        assert len(results) == 1
