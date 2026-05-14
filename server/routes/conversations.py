@@ -16,6 +16,10 @@ logger = logging.getLogger("agent-messenger.conversations")
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
+class TypingRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1, max_length=128)
+
+
 class ConversationCreate(BaseModel):
     type: str = Field(default="dm", pattern=r"^(dm|group|channel)$")
     name: Optional[str] = Field(None, max_length=256)
@@ -129,3 +133,70 @@ async def mark_conversation_read(conv_id: str, body: MarkRead):
     except Exception as e:
         logger.error("Failed to mark read for %s in %s: %s", body.agent_id, conv_id, e)
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{conv_id}/typing")
+async def set_typing(conv_id: str, body: TypingRequest):
+    """Set typing indicator for an agent in a conversation. Auto-expires after 5s."""
+    try:
+        safe_conv = sanitize_uuid(conv_id)
+        safe_agent = sanitize_agent_id(body.agent_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        db = get_db()
+        if not db.get_conversation(safe_conv):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        db.set_typing(safe_conv, safe_agent)
+        # Broadcast via WebSocket
+        from server.websocket import manager
+        await manager.broadcast_to_conversation(safe_conv, {
+            "type": "typing",
+            "conversation_id": safe_conv,
+            "agent_id": safe_agent,
+        }, exclude=safe_agent)
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to set typing for %s in %s: %s", body.agent_id, conv_id, e)
+        raise HTTPException(status_code=500, detail="Failed to set typing")
+
+
+@router.delete("/{conv_id}/typing")
+async def clear_typing(conv_id: str, agent_id: str):
+    """Clear typing indicator for an agent in a conversation."""
+    try:
+        safe_conv = sanitize_uuid(conv_id)
+        safe_agent = sanitize_agent_id(agent_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        db = get_db()
+        db.clear_typing(safe_conv, safe_agent)
+        from server.websocket import manager
+        await manager.broadcast_to_conversation(safe_conv, {
+            "type": "stop_typing",
+            "conversation_id": safe_conv,
+            "agent_id": safe_agent,
+        }, exclude=safe_agent)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error("Failed to clear typing for %s in %s: %s", agent_id, conv_id, e)
+        raise HTTPException(status_code=500, detail="Failed to clear typing")
+
+
+@router.get("/{conv_id}/typing")
+async def get_typing(conv_id: str):
+    """Get currently-typing agents in a conversation. Stale entries (>5s) auto-expire."""
+    try:
+        safe_conv = sanitize_uuid(conv_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        db = get_db()
+        typing = db.get_typing(safe_conv)
+        return {"status": "ok", "typing": typing, "count": len(typing)}
+    except Exception as e:
+        logger.error("Failed to get typing for %s: %s", conv_id, e)
+        raise HTTPException(status_code=500, detail="Failed to get typing")

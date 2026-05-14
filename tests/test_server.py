@@ -327,3 +327,281 @@ class TestAuth:
         client = AsyncClient(transport=transport, base_url="http://test")
         resp = await client.get("/health")
         assert resp.status_code == 200
+
+
+# ── v0.4.0 Feature Tests ──
+
+class TestMessageThreading:
+    """Feature 2: reply_to_id threading."""
+
+    def test_send_reply(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        parent = db.send_message(conv_id, "a1", "Hello")
+        reply = db.send_message(conv_id, "a1", "Reply", reply_to_id=parent["id"])
+
+        assert reply["reply_to_id"] == parent["id"]
+
+        replies = db.get_replies(parent["id"])
+        assert len(replies) == 1
+        assert replies[0]["content"] == "Reply"
+
+    def test_get_replies_empty(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Standalone")
+        replies = db.get_replies(msg["id"])
+        assert replies == []
+
+
+class TestMessageEdit:
+    """Feature 3: edit_message with original preservation."""
+
+    def test_edit_message(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Original")
+        edited = db.edit_message(msg["id"], "Updated")
+
+        assert edited is not None
+        assert edited["edited_at"] is not None
+        assert edited["original_content"] == "Original"
+        assert edited["content"] == "Updated"
+
+    def test_edit_deleted_message_fails(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "To be deleted")
+        db.soft_delete_message(msg["id"])
+        result = db.edit_message(msg["id"], "Try edit")
+        assert result is None
+
+
+class TestSoftDelete:
+    """Feature 4: soft delete with content masking."""
+
+    def test_soft_delete(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Secret info")
+        ok = db.soft_delete_message(msg["id"])
+        assert ok is True
+
+        deleted = db.get_message(msg["id"])
+        assert deleted["content"] == "[message deleted]"
+        assert deleted["deleted_at"] is not None
+
+    def test_soft_delete_idempotent(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Content")
+        assert db.soft_delete_message(msg["id"]) is True
+        assert db.soft_delete_message(msg["id"]) is False
+
+
+class TestReactions:
+    """Feature 5: emoji reactions with toggle."""
+
+    def test_add_reaction(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.create_conversation("dm", "test", ["a1", "a2"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Hello")
+        db.react_to_message(msg["id"], "a2", "thumbsup")
+
+        reactions = db.get_message_reactions(msg["id"])
+        assert len(reactions) == 1
+        assert reactions[0]["count"] == 1
+
+    def test_toggle_reaction_off(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Hello")
+        db.react_to_message(msg["id"], "a1", "thumbsup")
+        db.react_to_message(msg["id"], "a1", "thumbsup")  # Toggle off
+
+        reactions = db.get_message_reactions(msg["id"])
+        assert reactions == []
+
+    def test_multiple_agents_react(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.register_agent("a3", "Carol", "cluster")
+        db.create_conversation("group", "test", ["a1", "a2", "a3"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Big news")
+        db.react_to_message(msg["id"], "a2", "fire")
+        db.react_to_message(msg["id"], "a3", "fire")
+        db.react_to_message(msg["id"], "a2", "party")
+
+        reactions = db.get_message_reactions(msg["id"])
+        fire = [r for r in reactions if r["emoji"] == "fire"][0]
+        assert fire["count"] == 2
+        party = [r for r in reactions if r["emoji"] == "party"][0]
+        assert party["count"] == 1
+
+
+class TestDeliveryTracking:
+    """Feature 6: message delivery receipts."""
+
+    def test_mark_delivered(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.create_conversation("dm", "test", ["a1", "a2"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Hello")
+        db.mark_delivered(msg["id"], "a2")
+
+        status = db.get_delivery_status(msg["id"])
+        assert len(status) == 1
+        assert status[0]["agent_id"] == "a2"
+
+    def test_undelivered_messages(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.create_conversation("dm", "test", ["a1", "a2"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg1 = db.send_message(conv_id, "a1", "Msg 1")
+        msg2 = db.send_message(conv_id, "a1", "Msg 2")
+
+        db.mark_delivered(msg1["id"], "a2")
+
+        undelivered = db.get_undelivered_messages("a2")
+        assert len(undelivered) == 1
+        assert undelivered[0]["id"] == msg2["id"]
+
+
+class TestPriorityMessages:
+    """Feature 7: priority field on messages."""
+
+    def test_send_urgent_message(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "URGENT", priority="urgent")
+        assert msg["priority"] == "urgent"
+
+    def test_default_priority_normal(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.create_conversation("dm", "test", ["a1"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        msg = db.send_message(conv_id, "a1", "Normal")
+        assert msg["priority"] == "normal"
+
+
+class TestMigrationV2:
+    """Verify migration v2 adds columns to existing DB."""
+
+    def test_migration_adds_columns(self, tmp_path):
+        import sqlite3
+        db_path = str(tmp_path / "migrate_test.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT, type TEXT, status TEXT, metadata TEXT DEFAULT '{}', created_at TEXT);
+            CREATE TABLE conversations (id TEXT PRIMARY KEY, type TEXT, name TEXT, created_at TEXT, updated_at TEXT);
+            CREATE TABLE conversation_members (conversation_id TEXT, agent_id TEXT, role TEXT DEFAULT 'member', PRIMARY KEY(conversation_id, agent_id));
+            CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT, sender_id TEXT, content TEXT, type TEXT DEFAULT 'text', metadata TEXT DEFAULT '{}', created_at TEXT, read_by TEXT DEFAULT '[]');
+            CREATE TABLE typing_indicators (conversation_id TEXT, agent_id TEXT, started_at TEXT, PRIMARY KEY(conversation_id, agent_id));
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT);
+            INSERT INTO schema_migrations VALUES (1, '2026-01-01');
+        """)
+        conn.commit()
+        conn.close()
+
+        db = MessengerDB(db_path)
+        cols = [c[1] for c in db.conn.execute("PRAGMA table_info(messages)").fetchall()]
+        db.close()
+
+        assert "reply_to_id" in cols
+        assert "priority" in cols
+        assert "edited_at" in cols
+        assert "edited_content" in cols
+        assert "deleted_at" in cols
+
+
+class TestTypingTimeout:
+    """Feature 1: typing indicator auto-timeout."""
+
+    def test_expired_typing_filtered(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.create_conversation("dm", "test", ["a1", "a2"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        db.conn.execute(
+            "INSERT INTO typing_indicators (conversation_id, agent_id, started_at) VALUES (?, ?, ?)",
+            (conv_id, "a1", "2026-01-01T00:00:00+00:00"),
+        )
+        db.conn.commit()
+
+        result = db.get_typing(conv_id, timeout_seconds=15)
+        assert len(result) == 0
+
+    def test_recent_typing_preserved(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.create_conversation("dm", "test", ["a1", "a2"])
+        convs = db.list_conversations("a1")
+        conv_id = convs[0]["id"]
+
+        db.set_typing(conv_id, "a1")
+        result = db.get_typing(conv_id, timeout_seconds=15)
+        assert len(result) == 1
+        assert result[0]["agent_id"] == "a1"
+
+
+class TestAgentCapabilities:
+    """Feature 8: agent capabilities."""
+
+    def test_set_capabilities(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        result = db.set_agent_capabilities("a1", ["research", "writing"])
+        assert result is not None
+        assert "research" in result["metadata"]["capabilities"]
+
+    def test_find_by_capability(self, db):
+        db.register_agent("a1", "Alice", "cluster")
+        db.register_agent("a2", "Bob", "cluster")
+        db.set_agent_capabilities("a1", ["research", "writing"])
+        db.set_agent_capabilities("a2", ["coding", "research"])
+
+        researchers = db.find_agents_by_capability("research")
+        assert len(researchers) == 2
+
+        coders = db.find_agents_by_capability("coding")
+        assert len(coders) == 1

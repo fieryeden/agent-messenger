@@ -13,8 +13,9 @@ from server.security import sanitize_sql_like
 logger = logging.getLogger("agent-messenger.db")
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now(offset_seconds: int = 0) -> str:
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).isoformat()
 
 
 class MessengerDB:
@@ -55,16 +56,21 @@ class MessengerDB:
                 joined_at TEXT NOT NULL,
                 PRIMARY KEY (conversation_id, agent_id)
             );
-            CREATE TABLE IF NOT EXISTS messages (
-                id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                sender_id TEXT NOT NULL REFERENCES agents(id),
-                content TEXT NOT NULL,
-                type TEXT DEFAULT 'text',
-                metadata TEXT DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                read_by TEXT DEFAULT '[]'
-            );
+ CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            sender_id TEXT NOT NULL REFERENCES agents(id),
+            content TEXT NOT NULL,
+            type TEXT DEFAULT 'text',
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            read_by TEXT DEFAULT '[]',
+            reply_to_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+            priority TEXT DEFAULT 'normal',
+            edited_at TEXT,
+            edited_content TEXT,
+            deleted_at TEXT
+        );
             CREATE TABLE IF NOT EXISTS typing_indicators (
                 conversation_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
@@ -82,6 +88,21 @@ class MessengerDB:
             CREATE INDEX IF NOT EXISTS idx_agents_type ON agents(type);
             CREATE INDEX IF NOT EXISTS idx_conv_type ON conversations(type);
             CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL,
+            emoji TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (message_id, agent_id, emoji)
+        );
+        CREATE TABLE IF NOT EXISTS message_delivery (
+            message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL,
+            delivered_at TEXT NOT NULL,
+            PRIMARY KEY (message_id, agent_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_msg_reactions ON message_reactions(message_id);
+        CREATE INDEX IF NOT EXISTS idx_msg_delivery ON message_delivery(message_id);
         """)
         self.conn.commit()
 
@@ -98,6 +119,14 @@ class MessengerDB:
             (1, "add_api_key_columns", [
                 "ALTER TABLE agents ADD COLUMN api_key_hash TEXT",
                 "ALTER TABLE agents ADD COLUMN api_key_scopes TEXT DEFAULT '[\"agent\"]'",
+            ]),
+            (2, "add_message_threading_edit_delete", [
+                "ALTER TABLE messages ADD COLUMN reply_to_id TEXT REFERENCES messages(id) ON DELETE SET NULL",
+                "ALTER TABLE messages ADD COLUMN priority TEXT DEFAULT 'normal'",
+                "ALTER TABLE messages ADD COLUMN edited_at TEXT",
+                "ALTER TABLE messages ADD COLUMN edited_content TEXT",
+                "ALTER TABLE messages ADD COLUMN deleted_at TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_msg_reply ON messages(reply_to_id)",
             ]),
         ]
 
@@ -272,14 +301,14 @@ class MessengerDB:
 
     # ── Messages ──
 
-    def send_message(self, conversation_id: str, sender_id: str, content: str, msg_type: str = "text", metadata: dict = None) -> dict:
+    def send_message(self, conversation_id: str, sender_id: str, content: str, msg_type: str = "text", metadata: dict = None, reply_to_id: str = None, priority: str = "normal") -> dict:
         msg_id = str(uuid.uuid4())
         now = _now()
         meta_json = json.dumps(metadata or {})
         self.conn.execute(
-            """INSERT INTO messages (id, conversation_id, sender_id, content, type, metadata, created_at, read_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, conversation_id, sender_id, content, msg_type, meta_json, now, json.dumps([sender_id])),
+            """INSERT INTO messages (id, conversation_id, sender_id, content, type, metadata, created_at, read_by, reply_to_id, priority)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (msg_id, conversation_id, sender_id, content, msg_type, meta_json, now, json.dumps([sender_id]), reply_to_id, priority),
         )
         # Update conversation timestamp
         self.conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
@@ -308,10 +337,41 @@ class MessengerDB:
         return [self._msg_row(r) for r in reversed(rows)]
 
     def delete_message(self, msg_id: str) -> bool:
+        """Hard delete — removes the row entirely."""
         c = self.conn.cursor()
         c.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
         self.conn.commit()
         return c.rowcount > 0
+
+    def soft_delete_message(self, msg_id: str) -> bool:
+        """Soft delete — marks deleted_at, content becomes '[message deleted]'."""
+        now = _now()
+        c = self.conn.cursor()
+        c.execute("UPDATE messages SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now, msg_id))
+        self.conn.commit()
+        return c.rowcount > 0
+
+    def edit_message(self, msg_id: str, new_content: str) -> Optional[dict]:
+        """Edit a message — stores original in edited_content, updates content, sets edited_at."""
+        msg = self.get_message(msg_id)
+        if not msg or msg.get("deleted_at"):
+            return None
+        now = _now()
+        # Store current content as edited_content (the original), put new in content
+        self.conn.execute(
+            "UPDATE messages SET edited_content = ?, edited_at = ? WHERE id = ?",
+            (new_content, now, msg_id),
+        )
+        self.conn.commit()
+        return self.get_message(msg_id)
+
+    def get_replies(self, msg_id: str, limit: int = 50) -> list[dict]:
+        """Get all replies to a specific message."""
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE reply_to_id = ? ORDER BY created_at ASC LIMIT ?",
+            (msg_id, limit),
+        ).fetchall()
+        return [self._msg_row(r) for r in rows]
 
     def mark_read(self, msg_id: str, agent_id: str):
         msg = self.get_message(msg_id)
@@ -371,7 +431,18 @@ class MessengerDB:
         )
         self.conn.commit()
 
-    def get_typing(self, conversation_id: str) -> list[dict]:
+    TYPING_TIMEOUT_SECONDS = 5
+
+    def get_typing(self, conversation_id: str, timeout_seconds: int = None) -> list[dict]:
+        """Get currently-typing agents, auto-expiring stale entries."""
+        timeout = timeout_seconds if timeout_seconds is not None else self.TYPING_TIMEOUT_SECONDS
+        cutoff = _now(offset_seconds=-timeout)
+        # Delete stale typing indicators
+        self.conn.execute(
+            "DELETE FROM typing_indicators WHERE conversation_id = ? AND started_at < ?",
+            (conversation_id, cutoff),
+        )
+        self.conn.commit()
         rows = self.conn.execute(
             "SELECT agent_id, started_at FROM typing_indicators WHERE conversation_id = ?",
             (conversation_id,),
@@ -445,7 +516,152 @@ class MessengerDB:
             d["read_by"] = []
         if "sender_name" in d:
             d["sender_name"] = d["sender_name"]
+        # New fields with defaults for backward compat
+        d.setdefault("reply_to_id", None)
+        d.setdefault("priority", "normal")
+        d.setdefault("edited_at", None)
+        d.setdefault("edited_content", None)
+        d.setdefault("deleted_at", None)
+        # Soft-deleted messages: only expose limited info
+        if d.get("deleted_at"):
+            d["content"] = "[message deleted]"
+            d["edited_content"] = None
+        elif d.get("edited_at") and d.get("edited_content"):
+            d["original_content"] = d["content"]
+            d["content"] = d["edited_content"]
         return d
+
+    # ── Reactions ──
+
+    def react_to_message(self, message_id: str, agent_id: str, emoji: str):
+        """Toggle a reaction — add if not present, remove if already exists."""
+        existing = self.conn.execute(
+            "SELECT 1 FROM message_reactions WHERE message_id = ? AND agent_id = ? AND emoji = ?",
+            (message_id, agent_id, emoji),
+        ).fetchone()
+        if existing:
+            self.conn.execute(
+                "DELETE FROM message_reactions WHERE message_id = ? AND agent_id = ? AND emoji = ?",
+                (message_id, agent_id, emoji),
+            )
+        else:
+            self.conn.execute(
+                "INSERT INTO message_reactions (message_id, agent_id, emoji, created_at) VALUES (?, ?, ?, ?)",
+                (message_id, agent_id, emoji, _now()),
+            )
+        self.conn.commit()
+
+    def get_message_reactions(self, message_id: str) -> dict:
+        """Get reactions grouped by emoji with agent lists."""
+        rows = self.conn.execute(
+            "SELECT emoji, agent_id, created_at FROM message_reactions WHERE message_id = ? ORDER BY created_at",
+            (message_id,),
+        ).fetchall()
+        result = {}
+        for row in rows:
+            emoji = row["emoji"]
+            if emoji not in result:
+                result[emoji] = {"emoji": emoji, "count": 0, "agents": []}
+            result[emoji]["count"] += 1
+            result[emoji]["agents"].append(row["agent_id"])
+        return list(result.values())
+
+    # ── Delivery Tracking ──
+
+    def mark_delivered(self, message_id: str, agent_id: str):
+        """Mark a message as delivered to an agent."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO message_delivery (message_id, agent_id, delivered_at) VALUES (?, ?, ?)",
+            (message_id, agent_id, _now()),
+        )
+        self.conn.commit()
+
+    def get_delivery_status(self, message_id: str) -> list[dict]:
+        """Get delivery status for a message (which agents received it)."""
+        rows = self.conn.execute(
+            "SELECT agent_id, delivered_at FROM message_delivery WHERE message_id = ?",
+            (message_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Broadcast ──
+
+    def broadcast_message(self, sender_id: str, content: str, msg_type: str = "text", metadata: dict = None, priority: str = "normal") -> dict:
+        """Send a message to all agents via the global broadcast conversation."""
+        # Find or create the broadcast conversation
+        bc = self.conn.execute(
+            "SELECT id FROM conversations WHERE type = 'channel' AND name = '__broadcast__'"
+        ).fetchone()
+        if not bc:
+            # Create broadcast channel with all agents
+            conv = self.create_conversation("channel", "__broadcast__", [sender_id])
+            conv_id = conv["id"]
+        else:
+            conv_id = bc["id"]
+        return self.send_message(conv_id, sender_id, content, msg_type, metadata, priority=priority)
+
+    # ── Agent Capabilities ──
+
+    def set_agent_capabilities(self, agent_id: str, capabilities: list[str]):
+        """Store agent capabilities as JSON in metadata."""
+        agent = self.get_agent(agent_id)
+        if not agent:
+            return None
+        meta = agent.get("metadata", {})
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        meta["capabilities"] = capabilities
+        self.conn.execute(
+            "UPDATE agents SET metadata = ? WHERE id = ?",
+            (json.dumps(meta), agent_id),
+        )
+        self.conn.commit()
+        return self.get_agent(agent_id)
+
+    def find_agents_by_capability(self, capability: str) -> list[dict]:
+        """Find agents that have a specific capability."""
+        rows = self.conn.execute(
+            "SELECT * FROM agents WHERE json_extract(metadata, '$.capabilities') LIKE ?",
+            (f'%"{capability}"%',),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Offline Message Queue ──
+
+    def queue_message(self, conversation_id: str, sender_id: str, content: str, msg_type: str = "text", metadata: dict = None, reply_to_id: str = None, priority: str = "normal") -> dict:
+        """Send a message and queue it for offline recipients."""
+        msg = self.send_message(conversation_id, sender_id, content, msg_type, metadata, reply_to_id, priority)
+        # Message is stored in DB; offline agents will get it on reconnect via list_conversations/get_messages
+        return msg
+
+    def get_undelivered_messages(self, agent_id: str, limit: int = 100) -> list[dict]:
+        """Get messages in agent's conversations that haven't been delivered to them yet."""
+        convs = self.list_conversations(agent_id)
+        undelivered = []
+        for conv in convs:
+            conv_id = conv["id"]
+            rows = self.conn.execute(
+                """SELECT m.* FROM messages m
+                   LEFT JOIN message_delivery d ON m.id = d.message_id AND d.agent_id = ?
+                   WHERE m.conversation_id = ? AND d.message_id IS NULL AND m.sender_id != ?
+                   ORDER BY m.created_at ASC LIMIT ?""",
+                (agent_id, conv_id, agent_id, limit),
+            ).fetchall()
+            undelivered.extend([self._msg_row(r) for r in rows])
+        return undelivered[:limit]
+
+    # ── Conversation Members Helper ──
+
+    def get_conversation_members(self, conversation_id: str) -> list[dict]:
+        """Get all members of a conversation."""
+        rows = self.conn.execute(
+            "SELECT agent_id, role FROM conversation_members WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

@@ -15,6 +15,7 @@ from server.db import MessengerDB
 from server.db_accessor import get_db, set_db
 from server.routes import agents as agent_routes
 from server.routes import auth as auth_routes
+from server.routes import broadcast as broadcast_routes
 from server.routes import conversations as conv_routes
 from server.routes import messages as msg_routes
 from server.security import (
@@ -242,12 +243,14 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     app.include_router(agent_routes.router, prefix=v1_prefix)
     app.include_router(conv_routes.router, prefix=v1_prefix)
     app.include_router(msg_routes.router, prefix=v1_prefix)
+    app.include_router(broadcast_routes.router, prefix=v1_prefix)
 
     # Backward-compat unversioned mount
     app.include_router(auth_routes.router, prefix="/api")
     app.include_router(agent_routes.router, prefix="/api")
     app.include_router(conv_routes.router, prefix="/api")
     app.include_router(msg_routes.router, prefix="/api")
+    app.include_router(broadcast_routes.router, prefix="/api")
 
     # ── Audit API ──
     @app.get("/api/v1/audit")
