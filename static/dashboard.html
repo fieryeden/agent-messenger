@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Messenger</title>
+<style>
+:root{--bg0:#0d1117;--bg1:#161b22;--bg2:#1f2937;--bg3:#30363d;--fg0:#f0f6fc;--fg1:#c9d1d9;--fg2:#8b949e;--fg3:#484f58;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--orange:#d29922;--purple:#bc8cff;--radius:6px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg0);color:var(--fg1);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{background:none;border:none;color:var(--fg1);cursor:pointer;font:inherit;padding:4px 8px;border-radius:var(--radius)}
+button:hover{background:var(--bg2)}
+input,textarea{background:var(--bg0);border:1px solid var(--bg3);color:var(--fg1);padding:8px 12px;border-radius:var(--radius);font:inherit;outline:none}
+input:focus,textarea:focus{border-color:var(--blue)}
+textarea{resize:none}
+
+/* Layout */
+.header{background:var(--bg1);padding:8px 16px;display:flex;align-items:center;border-bottom:1px solid var(--bg3);gap:12px;flex-shrink:0}
+.header h1{font-size:15px;color:var(--fg0);white-space:nowrap}
+.header .conn{margin-left:auto;font-size:12px;display:flex;align-items:center;gap:6px}
+.header .conn .dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
+.header .conn .dot.on{background:var(--green)}
+.main{display:flex;flex:1;overflow:hidden}
+
+/* Sidebar */
+.sidebar{width:280px;background:var(--bg1);border-right:1px solid var(--bg3);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-tabs{display:flex;border-bottom:1px solid var(--bg3)}
+.sidebar-tabs button{flex:1;padding:10px;font-size:12px;color:var(--fg2);border-bottom:2px solid transparent}
+.sidebar-tabs button.active{color:var(--fg0);border-bottom-color:var(--blue)}
+.sidebar-search{padding:8px}
+.sidebar-search input{width:100%;font-size:13px}
+.sidebar-list{flex:1;overflow-y:auto}
+.sidebar-item{padding:10px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;border-bottom:1px solid var(--bg3)}
+.sidebar-item:hover{background:var(--bg2)}
+.sidebar-item.active{background:rgba(31,111,235,0.15)}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot.online{background:var(--green)}
+.dot.offline{background:var(--fg3)}
+.item-name{font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-sub{font-size:11px;color:var(--fg2);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-badge{background:var(--blue);color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;flex-shrink:0}
+.sidebar-footer{padding:8px;border-top:1px solid var(--bg3);display:flex;gap:8px}
+.sidebar-footer button{flex:1;font-size:12px;padding:6px;background:var(--bg2);border-radius:var(--radius)}
+
+/* Chat */
+.chat{flex:1;display:flex;flex-direction:column;min-width:0}
+.chat-head{padding:10px 16px;border-bottom:1px solid var(--bg3);background:var(--bg1);display:flex;align-items:center;gap:8px;flex-shrink:0}
+.chat-head h2{font-size:14px;flex:1}
+.chat-head .members{font-size:11px;color:var(--fg2)}
+.chat-head button{font-size:12px;padding:4px 8px}
+.messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
+.empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--fg3);font-size:14px}
+.msg-row{display:flex;flex-direction:column;max-width:75%}
+.msg-row.self{align-self:flex-end;align-items:flex-end}
+.msg-row.other{align-self:flex-start;align-items:flex-start}
+.msg-sender{font-size:11px;color:var(--fg2);margin-bottom:2px;padding:0 4px}
+.msg-bubble{padding:8px 12px;border-radius:12px;font-size:14px;line-height:1.5;word-break:break-word;position:relative}
+.msg-row.self .msg-bubble{background:var(--blue);color:#fff;border-bottom-right-radius:4px}
+.msg-row.other .msg-bubble{background:var(--bg2);border-bottom-left-radius:4px}
+.msg-bubble .reply-ref{font-size:11px;color:var(--fg2);margin-bottom:4px;padding:2px 6px;background:rgba(0,0,0,0.15);border-radius:4px;cursor:pointer}
+.msg-row.self .msg-bubble .reply-ref{color:rgba(255,255,255,0.7)}
+.msg-meta{font-size:10px;color:var(--fg3);padding:0 4px;margin-top:2px;display:flex;gap:8px;align-items:center}
+.msg-meta button{font-size:10px;padding:0 4px;color:var(--fg3)}
+.msg-meta button:hover{color:var(--blue)}
+.msg-reactions{display:flex;gap:4px;margin-top:2px;padding:0 4px}
+.reaction-chip{font-size:12px;padding:1px 6px;border-radius:10px;background:var(--bg2);cursor:pointer;border:1px solid var(--bg3)}
+.reaction-chip:hover{border-color:var(--blue)}
+.msg-deleted{font-style:italic;color:var(--fg3)}
+.msg-edited{font-size:10px;color:var(--fg3)}
+
+/* Input area */
+.input-area{padding:12px 16px;border-top:1px solid var(--bg3);background:var(--bg1);flex-shrink:0}
+.input-area .reply-bar{font-size:12px;color:var(--fg2);padding:4px 8px;margin-bottom:8px;background:var(--bg2);border-radius:var(--radius);display:flex;align-items:center;gap:8px}
+.input-area .reply-bar button{color:var(--red);font-size:12px}
+.input-row{display:flex;gap:8px;align-items:flex-end}
+.input-row textarea{flex:1;min-height:38px;max-height:120px;font-size:14px;line-height:1.4}
+.input-row .send-btn{background:var(--blue);color:#fff;padding:8px 16px;border-radius:var(--radius);font-size:13px;font-weight:600;white-space:nowrap}
+.input-row .send-btn:hover{background:#4493f8}
+
+/* Feed panel */
+.feed{width:300px;background:var(--bg1);border-left:1px solid var(--bg3);display:flex;flex-direction:column;flex-shrink:0}
+.feed-head{padding:10px 12px;border-bottom:1px solid var(--bg3);font-size:13px;color:var(--fg2);display:flex;align-items:center}
+.feed-list{flex:1;overflow-y:auto}
+.feed-item{padding:8px 12px;border-bottom:1px solid var(--bg3)}
+.feed-item .fi-from{font-size:12px;color:var(--blue);font-weight:600}
+.feed-item .fi-text{font-size:13px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.feed-item .fi-time{font-size:10px;color:var(--fg3);margin-top:2px}
+
+/* Modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:var(--bg1);border:1px solid var(--bg3);border-radius:8px;padding:20px;min-width:360px;max-width:90vw}
+.modal h3{margin-bottom:16px;font-size:15px;color:var(--fg0)}
+.modal label{display:block;font-size:12px;color:var(--fg2);margin-bottom:4px;margin-top:12px}
+.modal input,.modal textarea{width:100%}
+.modal .btn-row{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+.modal .btn-primary{background:var(--blue);color:#fff;padding:6px 16px;border-radius:var(--radius)}
+.modal .btn-secondary{background:var(--bg2);padding:6px 16px;border-radius:var(--radius)}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:3px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Agent Messenger</h1>
+  <div class="conn"><div class="dot" id="connDot"></div><span id="connText">Connecting</span></div>
+</div>
+
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-tabs">
+      <button class="active" data-tab="agents" id="tabAgents">Agents</button>
+      <button data-tab="convos" id="tabConvos">Conversations</button>
+    </div>
+    <div class="sidebar-search"><input id="searchBox" placeholder="Search agents, messages..."></div>
+    <div class="sidebar-list" id="sideList"></div>
+    <div class="sidebar-footer">
+      <button id="btnNewConv">+ Conversation</button>
+      <button id="btnBroadcast">Broadcast</button>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div class="chat">
+    <div class="chat-head" id="chatHead"><h2 id="chatTitle">Select a conversation</h2><span class="members" id="chatMembers"></span></div>
+    <div class="messages" id="msgList"><div class="empty">Pick an agent or conversation to start</div></div>
+    <div class="input-area" id="inputArea" style="display:none">
+      <div class="reply-bar" id="replyBar" style="display:none">
+        <span id="replyText">Replying to...</span>
+        <button id="replyCancel">x</button>
+      </div>
+      <div class="input-row">
+        <textarea id="msgInput" placeholder="Type a message..." rows="1"></textarea>
+        <button class="send-btn" id="sendBtn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feed -->
+  <div class="feed">
+    <div class="feed-head">Global Feed</div>
+    <div class="feed-list" id="feedList"></div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div class="modal-overlay" id="modalOverlay" style="display:none">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+var API="/api";
+var agents=[], convos=[], currentConv=null, currentMsgs=[], replyTo=null, activeTab="agents";
+var ws=null, reconnectMs=3000, searchTimer=null;
+
+// ── Helpers ──
+function $(id){return document.getElementById(id)}
+function esc(s){if(!s)return"";var d=document.createElement("div");d.appendChild(document.createTextNode(String(s)));return d.innerHTML}
+function timeAgo(ts){if(!ts)return"";var d=new Date(ts),n=Date.now(),diff=n-d.getTime();if(diff<60000)return"just now";if(diff<3600000)return Math.floor(diff/60000)+"m";if(diff<86400000)return Math.floor(diff/3600000)+"h";return d.toLocaleDateString()}
+function get(url){return fetch(url).then(function(r){return r.json()})}
+function post(url,body){return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json()})}
+function del(url){return fetch(url,{method:"DELETE"}).then(function(r){return r.json()})}
+
+// ── Data loading ──
+function loadAgents(){return get(API+"/agents").then(function(d){agents=d.agents||[];if(activeTab==="agents")renderSidebar()}).catch(function(e){console.error("[loadAgents]",e)})}
+function loadConvos(){return get("/dashboard/conversations").then(function(d){convos=d.conversations||[];if(activeTab==="convos")renderSidebar()}).catch(function(e){console.error("[loadConvos]",e)})}
+function loadFeed(){return get(API+"/messages/feed?limit=50").then(function(d){var msgs=d.messages||[];renderFeed(msgs)}).catch(function(e){console.error("[loadFeed]",e)})}
+function loadMessages(convId){return get(API+"/messages/conversation/"+convId+"?limit=100").then(function(d){currentMsgs=d.messages||[];renderMessages()}).catch(function(e){console.error("[loadMessages]",e)})}
+function loadSearch(q){return get(API+"/messages/search?q="+encodeURIComponent(q)+"&limit=20").then(function(d){renderSearchResults(d.results||[])}).catch(function(e){console.error("[loadSearch]",e)})}
+
+// ── Sidebar rendering ──
+function renderSidebar(){
+  var list=$("sideList");
+  if(activeTab==="agents"){
+    var html="";
+    for(var i=0;i<agents.length;i++){
+      var a=agents[i];
+      html+='<div class="sidebar-item" data-agent="'+esc(a.id)+'">'
+        +'<div class="dot '+esc(a.status)+'"></div>'
+        +'<span class="item-name">'+esc(a.name||a.id)+'</span>'
+        +'<span class="item-sub">'+esc(a.type)+'</span>'
+        +'</div>';
+    }
+    list.innerHTML=html;
+    bindSidebar("agent");
+  } else {
+    var html="";
+    for(var i=0;i<convos.length;i++){
+      var c=convos[i];
+      var label=c.name||c.members.join(", ");
+      var sub=c.last_message?c.last_message.content.substring(0,40):"No messages";
+      var badge=c.unread_count>0?'<span class="item-badge">'+c.unread_count+'</span>':"";
+      html+='<div class="sidebar-item" data-conv="'+esc(c.id)+'">'
+        +'<span class="item-name">'+esc(label)+'</span>'
+        +'<span class="item-sub">'+esc(sub)+'</span>'
+        +badge
+        +'</div>';
+    }
+    list.innerHTML=html;
+    bindSidebar("conv");
+  }
+}
+
+function bindSidebar(kind){
+  var items=document.querySelectorAll("[data-"+kind+"]");
+  for(var i=0;i<items.length;i++){
+    items[i].addEventListener("click",function(){
+      var id=this.getAttribute("data-"+kind);
+      if(kind==="agent")openAgentConv(id);
+      else openConv(id);
+    });
+  }
+}
+
+// ── Open conversation ──
+function openAgentConv(agentId){
+  // Find or create a DM with this agent
+  var existing=null;
+  for(var i=0;i<convos.length;i++){
+    var c=convos[i];
+    if(c.type==="dm"&&c.members&&c.members.indexOf(agentId)>=0){existing=c;break}
+  }
+  if(existing){openConv(existing.id);return}
+  // Create DM
+  post(API+"/conversations",{type:"dm",member_ids:["dashboard-viewer",agentId]}).then(function(d){
+    if(d.conversation){convos.unshift(d.conversation);openConv(d.conversation.id)}
+    else if(d.detail){showToast("Error: "+JSON.stringify(d.detail))}
+  });
+}
+
+function openConv(convId){
+  currentConv=convId;
+  replyTo=null;
+  $("replyBar").style.display="none";
+  $("inputArea").style.display="";
+  $("msgInput").value="";
+  loadMessages(convId);
+  // Update header
+  for(var i=0;i<convos.length;i++){
+    if(convos[i].id===convId){
+      var c=convos[i];
+      $("chatTitle").textContent=c.name||c.members.join(", ");
+      $("chatMembers").textContent=c.members?c.members.join(", "):"";
+      break;
+    }
+  }
+  // Highlight in sidebar
+  var items=document.querySelectorAll(".sidebar-item");
+  for(var j=0;j<items.length;j++){items[j].classList.remove("active")}
+  var el=document.querySelector('[data-conv="'+convId+'"]');
+  if(el)el.classList.add("active");
+}
+
+// ── Message rendering ──
+function renderMessages(){
+  var list=$("msgList");
+  if(!currentMsgs.length){list.innerHTML='<div class="empty">No messages yet</div>';return}
+  var html="";
+  for(var i=0;i<currentMsgs.length;i++){
+    var m=currentMsgs[i];
+    var isSelf=m.sender_id==="dashboard-viewer";
+    var cls=isSelf?"msg-row self":"msg-row other";
+    if(m.deleted_at){html+='<div class="'+cls+'"><div class="msg-bubble msg-deleted">Message deleted</div></div>';continue}
+    html+='<div class="'+cls+'" data-mid="'+esc(m.id)+'">';
+    if(!isSelf)html+='<div class="msg-sender">'+esc(m.sender_name||m.sender_id)+'</div>';
+    html+='<div class="msg-bubble">';
+    if(m.reply_to_id)html+='<div class="reply-ref" data-rmid="'+esc(m.reply_to_id)+'">↳ reply</div>';
+    html+=esc(m.content);
+    if(m.edited_at)html+='<span class="msg-edited"> (edited)</span>';
+    html+='</div>';
+    // Reactions
+    if(m.reactions&&m.reactions.length){
+      html+='<div class="msg-reactions">';
+      for(var r=0;r<m.reactions.length;r++){html+='<span class="reaction-chip" data-react="'+esc(m.reactions[r].emoji)+'" data-mid="'+esc(m.id)+'">'+esc(m.reactions[r].emoji)+" "+(m.reactions[r].count||1)+'</span>'}
+      html+='</div>';
+    }
+    // Meta
+    html+='<div class="msg-meta"><span>'+timeAgo(m.created_at)+'</span>';
+    html+='<button data-action="reply" data-mid="'+esc(m.id)+'">↩</button>';
+    html+='<button data-action="react" data-mid="'+esc(m.id)+'">😀</button>';
+    if(isSelf){html+='<button data-action="edit" data-mid="'+esc(m.id)+'">✎</button>';html+='<button data-action="delete" data-mid="'+esc(m.id)+'">🗑</button>'}
+    html+='</div></div>';
+  }
+  list.innerHTML=html;
+  list.scrollTop=list.scrollHeight;
+  // Bind message actions
+  bindMessageActions();
+}
+
+function bindMessageActions(){
+  // Reply buttons
+  var replyBtns=document.querySelectorAll('[data-action="reply"]');
+  for(var i=0;i<replyBtns.length;i++){
+    replyBtns[i].addEventListener("click",function(){
+      var mid=this.getAttribute("data-mid");
+      var msg=findMsg(mid);
+      if(msg){replyTo=mid;$("replyText").textContent="Replying to "+(msg.sender_name||msg.sender_id)+": "+msg.content.substring(0,50);$("replyBar").style.display="";$("msgInput").focus()}
+    });
+  }
+  // React buttons
+  var reactBtns=document.querySelectorAll('[data-action="react"]');
+  for(var i=0;i<reactBtns.length;i++){
+    reactBtns[i].addEventListener("click",function(){
+      var mid=this.getAttribute("data-mid");
+      var emoji=prompt("Enter emoji reaction:");
+      if(emoji){post(API+"/messages/"+mid+"/react",{agent_id:"dashboard-viewer",emoji:emoji}).then(function(){loadMessages(currentConv)}).catch(function(e){console.error("[react]",e)})}
+    });
+  }
+  // Edit buttons
+  var editBtns=document.querySelectorAll('[data-action="edit"]');
+  for(var i=0;i<editBtns.length;i++){
+    editBtns[i].addEventListener("click",function(){
+      var mid=this.getAttribute("data-mid");
+      var msg=findMsg(mid);
+      if(msg){var newContent=prompt("Edit message:",msg.content);if(newContent&&newContent!==msg.content){fetch(API+"/messages/"+mid,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:newContent,agent_id:"dashboard-viewer"})}).then(function(){loadMessages(currentConv)})}}
+    });
+  }
+  // Delete buttons
+  var delBtns=document.querySelectorAll('[data-action="delete"]');
+  for(var i=0;i<delBtns.length;i++){
+    delBtns[i].addEventListener("click",function(){
+      var mid=this.getAttribute("data-mid");
+      if(confirm("Delete this message?")){del(API+"/messages/"+mid+"?agent_id=dashboard-viewer").then(function(){loadMessages(currentConv)}).catch(function(e){console.error("[delete]",e)})}
+    });
+  }
+  // Existing reaction chips
+  var chips=document.querySelectorAll(".reaction-chip");
+  for(var i=0;i<chips.length;i++){
+    chips[i].addEventListener("click",function(){
+      var mid=this.getAttribute("data-mid"),emoji=this.getAttribute("data-react");
+      post(API+"/messages/"+mid+"/react",{agent_id:"dashboard-viewer",emoji:emoji}).then(function(){loadMessages(currentConv)});
+    });
+  }
+}
+
+function findMsg(id){for(var i=0;i<currentMsgs.length;i++){if(currentMsgs[i].id===id)return currentMsgs[i]}return null}
+
+// ── Send message ──
+function sendMessage(){
+  var content=$("msgInput").value.trim();
+  if(!content||!currentConv)return;
+  var body={conversation_id:currentConv,sender_id:"dashboard-viewer",content:content};
+  if(replyTo)body.reply_to_id=replyTo;
+  post(API+"/messages",body).then(function(d){
+    $("msgInput").value="";
+    replyTo=null;
+    $("replyBar").style.display="none";
+    loadMessages(currentConv);
+    loadFeed();
+  }).catch(function(e){console.error("[send]",e);showToast("Send failed")});
+}
+
+// ── Feed ──
+function renderFeed(msgs){
+  var list=$("feedList");
+  var html="";
+  for(var i=0;i<msgs.length;i++){
+    var m=msgs[i];
+    html+='<div class="feed-item" data-fconv="'+esc(m.conversation_id)+'">'
+      +'<div class="fi-from">'+esc(m.sender_name||m.sender_id)+'</div>'
+      +'<div class="fi-text">'+esc(m.content.substring(0,80))+'</div>'
+      +'<div class="fi-time">'+timeAgo(m.created_at)+'</div>'
+      +'</div>';
+  }
+  list.innerHTML=html;
+  // Click feed item to open that conversation
+  var items=list.querySelectorAll(".feed-item");
+  for(var j=0;j<items.length;j++){
+    items[j].addEventListener("click",function(){var cid=this.getAttribute("data-fconv");if(cid)openConv(cid)});
+  }
+}
+
+// ── Search ──
+function renderSearchResults(results){
+  var list=$("sideList");
+  if(!results.length){list.innerHTML='<div class="empty" style="padding:20px">No results</div>';return}
+  var html="";
+  for(var i=0;i<results.length;i++){
+    var r=results[i];
+    html+='<div class="sidebar-item" data-conv="'+esc(r.conversation_id)+'">'
+      +'<span class="item-name">'+esc(r.content.substring(0,50))+'</span>'
+      +'<span class="item-sub">'+esc(r.sender_name||r.sender_id)+'</span>'
+      +'</div>';
+  }
+  list.innerHTML=html;
+  bindSidebar("conv");
+}
+
+// ── Modals ──
+function showModal(html){$("modalContent").innerHTML=html;$("modalOverlay").style.display=""}
+function hideModal(){$("modalOverlay").style.display="none"}
+
+function showNewConvModal(){
+  var agentOpts="";
+  for(var i=0;i<agents.length;i++){agentOpts+='<option value="'+esc(agents[i].id)+'">'+esc(agents[i].name||agents[i].id)+'</option>'}
+  showModal('<h3>New Conversation</h3>'
+    +'<label>Type</label><select id="mConvType" style="width:100%;padding:6px;background:var(--bg0);color:var(--fg1);border:1px solid var(--bg3);border-radius:var(--radius))"><option value="dm">Direct Message</option><option value="group">Group</option></select>'
+    +'<label>Members (hold Ctrl to multi-select)</label><select id="mConvMembers" multiple style="width:100%;min-height:120px;background:var(--bg0);color:var(--fg1);border:1px solid var(--bg3);border-radius:var(--radius))">'+agentOpts+'</select>'
+    +'<label>Group Name (optional)</label><input id="mConvName" placeholder="Group name...">'
+    +'<div class="btn-row"><button class="btn-secondary" onclick="document.getElementById(\'modalOverlay\').style.display=\'none\'">Cancel</button><button class="btn-primary" id="mConvCreate">Create</button></div>'
+  );
+  $("mConvCreate").addEventListener("click",function(){
+    var type=$("mConvType").value;
+    var sel=$("mConvMembers");
+    var members=["dashboard-viewer"];
+    for(var i=0;i<sel.options.length;i++){if(sel.options[i].selected)members.push(sel.options[i].value)}
+    var body={type:type,member_ids:members};
+    if(type==="group"&&$("mConvName").value)body.name=$("mConvName").value;
+    post(API+"/conversations",body).then(function(d){
+      if(d.conversation){convos.unshift(d.conversation);openConv(d.conversation.id);loadConvos()}
+      hideModal();
+    }).catch(function(e){console.error("[createConv]",e)});
+  });
+}
+
+function showBroadcastModal(){
+  showModal('<h3>Broadcast Message</h3>'
+    +'<label>From Agent</label><input id="mBcFrom" value="dashboard-viewer">'
+    +'<label>Message</label><textarea id="mBcMsg" rows="3" style="width:100%" placeholder="Broadcast to all agents..."></textarea>'
+    +'<div class="btn-row"><button class="btn-secondary" onclick="document.getElementById(\'modalOverlay\').style.display=\'none\'">Cancel</button><button class="btn-primary" id="mBcSend">Send</button></div>'
+  );
+  $("mBcSend").addEventListener("click",function(){
+    var from=$("mBcFrom").value.trim()||"dashboard-viewer";
+    var msg=$("mBcMsg").value.trim();
+    if(!msg)return;
+    post(API+"/broadcast",{sender_id:from,content:msg}).then(function(d){
+      hideModal();loadFeed();showToast("Broadcast sent");
+    }).catch(function(e){console.error("[broadcast]",e)});
+  });
+}
+
+// ── Toast ──
+function showToast(msg){
+  var t=document.createElement("div");
+  t.style.cssText="position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--bg2);color:var(--fg0);padding:8px 20px;border-radius:8px;font-size:13px;z-index:200;border:1px solid var(--bg3)";
+  t.textContent=msg;document.body.appendChild(t);
+  setTimeout(function(){t.remove()},3000);
+}
+
+// ── WebSocket ──
+function connectWS(){
+  var proto=location.protocol==="https:"?"wss":"ws";
+  var url=proto+"://"+location.host+"/ws/dashboard-viewer";
+  console.log("[WS] connecting:",url);
+  try{ws=new WebSocket(url)}catch(e){console.error("[WS] create error:",e);setTimeout(connectWS,reconnectMs);return}
+  ws.onopen=function(){
+    console.log("[WS] connected");
+    $("connDot").classList.add("on");
+    $("connText").textContent="Connected";
+  };
+  ws.onmessage=function(e){
+    try{
+      var d=JSON.parse(e.data);
+      console.log("[WS] msg:",d.type);
+      if(d.type==="agent_status")loadAgents();
+      if(d.type==="new_message"){loadFeed();if(currentConv&&d.conversation_id===currentConv)loadMessages(currentConv);loadConvos()}
+      if(d.type==="message_edited"&&currentConv&&d.conversation_id===currentConv)loadMessages(currentConv);
+      if(d.type==="message_deleted"&&currentConv&&d.conversation_id===currentConv)loadMessages(currentConv);
+      if(d.type==="message_reacted"&&currentConv&&d.conversation_id===currentConv)loadMessages(currentConv);
+      if(d.type==="message_read"&&currentConv&&d.conversation_id===currentConv)loadMessages(currentConv);
+      if(d.type==="broadcast"){loadFeed();loadConvos()}
+      if(d.type==="typing"&&d.conversation_id===currentConv)showTyping(d.agent_id);
+      if(d.type==="stop_typing"&&d.conversation_id===currentConv){var ti=document.querySelector(".typing-indicator");if(ti)ti.remove()}
+    }catch(err){console.error("[WS] parse error:",err)}
+  };
+  ws.onerror=function(){console.error("[WS] error");$("connDot").classList.remove("on");$("connText").textContent="Error"};
+  ws.onclose=function(){
+    console.log("[WS] closed, reconnecting");$("connDot").classList.remove("on");$("connText").textContent="Disconnected";
+    setTimeout(connectWS,reconnectMs);
+  };
+}
+
+function showTyping(agentId){
+  var el=document.querySelector(".typing-indicator");
+  if(el)el.remove();
+  var div=document.createElement("div");
+  div.className="typing-indicator";
+  div.style.cssText="font-size:12px;color:var(--fg2);padding:4px 16px;font-style:italic";
+  div.textContent=agentId+" is typing...";
+  $("msgList").appendChild(div);
+  $("msgList").scrollTop=$("msgList").scrollHeight;
+  setTimeout(function(){div.remove()},3000);
+}
+
+// ── Event bindings ──
+$("tabAgents").addEventListener("click",function(){activeTab="agents";this.classList.add("active");$("tabConvos").classList.remove("active");renderSidebar()});
+$("tabConvos").addEventListener("click",function(){activeTab="convos";this.classList.add("active");$("tabAgents").classList.remove("active");loadConvos()});
+$("btnNewConv").addEventListener("click",showNewConvModal);
+$("btnBroadcast").addEventListener("click",showBroadcastModal);
+$("sendBtn").addEventListener("click",sendMessage);
+$("msgInput").addEventListener("keydown",function(e){if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
+$("msgInput").addEventListener("input",function(){
+  this.style.height="auto";this.style.height=Math.min(this.scrollHeight,120)+"px";
+  // Send typing indicator via WS
+  if(ws&&ws.readyState===1&&currentConv){
+    ws.send(JSON.stringify({type:"typing",conversation_id:currentConv}));
+  }
+});
+$("replyCancel").addEventListener("click",function(){replyTo=null;$("replyBar").style.display="none"});
+$("searchBox").addEventListener("input",function(){
+  clearTimeout(searchTimer);
+  var q=this.value.trim();
+  if(!q){renderSidebar();return}
+  searchTimer=setTimeout(function(){loadSearch(q)},300);
+});
+$("modalOverlay").addEventListener("click",function(e){if(e.target===$("modalOverlay"))hideModal()});
+
+// ── Init ──
+loadAgents();
+loadConvos();
+loadFeed();
+connectWS();
+setInterval(function(){loadAgents();loadFeed()},15000);
+
+})();
+</script>
+</body>
+</html>

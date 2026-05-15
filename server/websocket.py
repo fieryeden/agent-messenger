@@ -21,6 +21,8 @@ class ConnectionManager:
         self.connected_at: dict[str, float] = {}
         # agent_id -> list of capabilities advertised on connect
         self.capabilities: dict[str, list[str]] = {}
+        # Agents that receive ALL conversation broadcasts (dashboard viewers)
+        self.omniscient: set[str] = set()
 
     async def connect(self, agent_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -43,6 +45,7 @@ class ConnectionManager:
         self.subscriptions.pop(agent_id, None)
         self.connected_at.pop(agent_id, None)
         self.capabilities.pop(agent_id, None)
+        self.omniscient.discard(agent_id)
 
     async def send_to_agent(self, agent_id: str, data: dict):
         """Send a message to a specific agent's WebSocket."""
@@ -54,9 +57,9 @@ class ConnectionManager:
                 self.disconnect(agent_id)
 
     async def broadcast_to_conversation(self, conversation_id: str, data: dict, exclude: Optional[str] = None):
-        """Send to all agents subscribed to a conversation."""
+        """Send to all agents subscribed to a conversation, plus any omniscient agents."""
         for agent_id, subs in list(self.subscriptions.items()):
-            if conversation_id in subs and agent_id != exclude:
+            if (conversation_id in subs or agent_id in self.omniscient) and agent_id != exclude:
                 await self.send_to_agent(agent_id, data)
 
     async def broadcast(self, data: dict, exclude: Optional[str] = None):
@@ -69,9 +72,13 @@ class ConnectionManager:
         if agent_id in self.subscriptions:
             self.subscriptions[agent_id].add(conversation_id)
 
-    def unsubscribe(self, agent_id: str, conversation_id: str):
-        if agent_id in self.subscriptions:
-            self.subscriptions[agent_id].discard(conversation_id)
+    def subscribe_all(self, agent_id: str):
+        """Subscribe an agent to ALL conversation broadcasts (dashboard mode)."""
+        self.omniscient.add(agent_id)
+
+    def unsubscribe_all(self, agent_id: str):
+        """Remove omniscient subscription."""
+        self.omniscient.discard(agent_id)
 
     def is_online(self, agent_id: str) -> bool:
         return agent_id in self.active
@@ -100,6 +107,10 @@ async def websocket_handler(websocket: WebSocket, agent_id: str, db):
     convs = db.list_conversations(safe_agent)
     for conv in convs:
         manager.subscribe(safe_agent, conv["id"])
+
+    # Dashboard viewers get ALL conversation broadcasts
+    if safe_agent.startswith("dashboard"):
+        manager.subscribe_all(safe_agent)
 
     # Deliver any undelivered messages from while offline
     undelivered = db.get_undelivered_messages(safe_agent, limit=100)

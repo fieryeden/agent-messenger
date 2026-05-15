@@ -351,6 +351,31 @@ class MessengerDB:
             results.append(conv)
         return results
 
+    def list_all_conversations(self, limit: int = 100, offset: int = 0) -> list[dict]:
+        """List all conversations (dashboard view)."""
+        rows = self.conn.execute(
+            """
+            SELECT c.* FROM conversations c
+            ORDER BY c.updated_at DESC LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        results = []
+        for row in rows:
+            conv = self._conv_row(row)
+            members = self.conn.execute(
+                "SELECT agent_id FROM conversation_members WHERE conversation_id = ?",
+                (conv["id"],),
+            ).fetchall()
+            conv["members"] = [m["agent_id"] for m in members]
+            last_msg = self.conn.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
+                (conv["id"],),
+            ).fetchone()
+            conv["last_message"] = self._msg_row(last_msg) if last_msg else None
+            results.append(conv)
+        return results
+
     def add_conversation_member(self, conv_id: str, agent_id: str, role: str = "member"):
         self.conn.execute(
             "INSERT OR IGNORE INTO conversation_members (conversation_id, agent_id, role, joined_at) VALUES (?, ?, ?, ?)",

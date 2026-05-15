@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.staticfiles import StaticFiles
 
 from server.db import MessengerDB
 from server.db_accessor import get_db, set_db
@@ -100,7 +101,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     app = FastAPI(
         title="Agent Messenger",
-        version="0.3.0",
+        version="0.5.0",
         description="Inter-agent communication platform with JWT auth, real-time messaging, and dashboard",
     )
 
@@ -216,7 +217,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     async def health():
         return {
             "status": "healthy",
-            "version": "0.3.0",
+            "version": "0.5.0",
             "ws_connections": len(ws_manager.active),
             "auth_enabled": config.get("auth", {}).get("enabled", False),
         }
@@ -310,6 +311,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         convs = db.list_conversations(safe_agent)
         for conv in convs:
             ws_manager.subscribe(safe_agent, conv["id"])
+
+        # Dashboard viewers get ALL conversation broadcasts
+        if safe_agent.startswith("dashboard"):
+            ws_manager.subscribe_all(safe_agent)
 
         # Notify online
         await ws_manager.broadcast({
@@ -413,13 +418,42 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             except Exception as e:
                 return JSONResponse(status_code=500, content={"detail": str(e)})
 
-        @app.get("/dashboard", response_class=HTMLResponse)
-        async def dashboard():
-            return _dashboard_html()
 
-        @app.get("/", response_class=HTMLResponse)
-        async def root():
-            return _dashboard_html()
+
+
+    @app.get("/dashboard/conversations")
+    async def dashboard_conversations(limit: int = 100, offset: int = 0):
+        try:
+            db_ref = get_db()
+            convs = db_ref.list_all_conversations(limit, offset)
+            return {"status": "ok", "conversations": convs, "count": len(convs)}
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"detail": str(e)})
+
+    # Mount static files for dashboard
+    import os as _os
+    _static_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "static")
+    if _os.path.isdir(_static_dir):
+        app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+    @app.get("/dashboard")
+    async def dashboard():
+        from starlette.responses import Response
+        with open(_os.path.join(_static_dir, "dashboard.html"), "r") as _f:
+            _html = _f.read()
+        return Response(content=_html, media_type="text/html", headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
+
+    @app.get("/")
+    async def root():
+        from starlette.responses import RedirectResponse
+        import hashlib as _hl
+        with open(_os.path.join(_static_dir, "dashboard.html"), "rb") as _f:
+            _h = _hl.md5(_f.read()).hexdigest()[:8]
+        return RedirectResponse(url="/dashboard?v=" + _h)
 
     # ── Graceful Shutdown ──
     shutdown_handler = GracefulShutdown(shutdown_callback=lambda: _cleanup())
@@ -449,96 +483,6 @@ def _cleanup():
             pass
 
 
-def _dashboard_html() -> str:
-    """Dark-themed dashboard with agent list, DM windows, global feed."""
-    return """<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Agent Messenger Dashboard</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;height:100vh;display:flex;flex-direction:column}
-.header{background:#161b22;padding:12px 20px;display:flex;align-items:center;border-bottom:1px solid #30363d}
-.header h1{font-size:16px;color:#f0f6fc}
-.header .status{margin-left:auto;font-size:12px;color:#8b949e}
-.main{display:flex;flex:1;overflow:hidden}
-.sidebar{width:260px;background:#161b22;border-right:1px solid #30363d;display:flex;flex-direction:column}
-.sidebar-header{padding:12px;border-bottom:1px solid #30363d;font-size:13px;color:#8b949e}
-.agent-list{flex:1;overflow-y:auto;padding:8px}
-.agent-item{padding:10px 12px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;margin-bottom:2px}
-.agent-item:hover{background:#1f2937}
-.agent-item.active{background:#1f6feb33}
-.agent-dot{width:8px;height:8px;border-radius:50%}
-.agent-dot.online{background:#3fb950}
-.agent-dot.offline{background:#484f58}
-.agent-name{font-size:13px;flex:1}
-.agent-type{font-size:11px;color:#8b949e}
-.chat-area{flex:1;display:flex;flex-direction:column}
-.chat-header{padding:12px 20px;border-bottom:1px solid #30363d;background:#161b22}
-.chat-header h2{font-size:14px;color:#f0f6fc}
-.messages{flex:1;overflow-y:auto;padding:16px 20px}
-.msg{margin-bottom:12px}
-.msg-sender{font-size:12px;color:#8b949e;margin-bottom:2px}
-.msg-content{font-size:14px;line-height:1.5;background:#161b22;padding:8px 12px;border-radius:8px;display:inline-block;max-width:70%}
-.msg-time{font-size:11px;color:#484f58;margin-top:2px}
-.feed-area{width:320px;background:#161b22;border-left:1px solid #30363d;display:flex;flex-direction:column}
-.feed-header{padding:12px;border-bottom:1px solid #30363d;font-size:13px;color:#8b949e}
-.feed-content{flex:1;overflow-y:auto;padding:8px}
-.feed-item{padding:8px 12px;border-radius:6px;margin-bottom:4px;font-size:12px;background:#0d1117}
-.feed-item .from{color:#58a6ff;font-weight:600}
-.feed-item .text{color:#c9d1d9;margin-top:2px}
-.feed-item .time{color:#484f58;font-size:11px;margin-top:2px}
-.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:14px}
-.stats-bar{padding:8px 12px;border-top:1px solid #30363d;font-size:11px;color:#8b949e;display:flex;gap:16px}
-.stat-value{color:#f0f6fc;font-weight:600}
-</style></head><body>
-<div class="header"><h1>📡 Agent Messenger</h1><span class="status" id="connStatus">Connecting...</span></div>
-<div class="main">
-<div class="sidebar">
-<div class="sidebar-header">AGENTS</div>
-<div class="agent-list" id="agentList"></div>
-<div class="stats-bar" id="statsBar"></div>
-</div>
-<div class="chat-area">
-<div class="chat-header"><h2 id="chatTitle">Select an agent</h2></div>
-<div class="messages" id="messageArea"><div class="empty-state">Select an agent to start chatting</div></div>
-</div>
-<div class="feed-area">
-<div class="feed-header">GLOBAL FEED</div>
-<div class="feed-content" id="feedContent"></div>
-</div>
-</div>
-<script>
-const API='/api';let agents=[],selectedAgent=null,ws=null;
-async function loadAgents(){const r=await fetch(API+'/agents');const d=await r.json();agents=d.agents||[];renderAgents();}
-async function loadFeed(){const r=await fetch(API+'/messages/feed?limit=50');const d=await r.json();const feed=d.messages||d.results||[];document.getElementById('feedContent').innerHTML=feed.map(m=>'<div class="feed-item"><span class="from">'+(m.sender_name||m.sender_id)+'</span><div class="text">'+m.content+'</div><div class="time">'+m.created_at+'</div></div>').join('');}
-async function loadStats(){const r=await fetch('/metrics');const d=await r.json();const s=d.stats||{};document.getElementById('statsBar').innerHTML='<span>Agents: <span class="stat-value">'+s.agents+'</span></span>'+'<span>Online: <span class="stat-value">'+s.online+'</span></span>'+'<span>Messages: <span class="stat-value">'+s.messages+'</span></span>';}
-function renderAgents(){document.getElementById('agentList').innerHTML=agents.map(a=>'<div class="agent-item'+(selectedAgent===a.id?' active':'')+'" onclick="selectAgent(\''+a.id+'\')">'+'<div class="agent-dot '+a.status+'"></div>'+'<span class="agent-name">'+a.name+'</span>'+'<span class="agent-type">'+a.type+'</span></div>').join('');}
-async function selectAgent(id){selectedAgent=id;const agent=agents.find(a=>a.id===id);document.getElementById('chatTitle').textContent=agent?agent.name:id;renderAgents();const r=await fetch(API+'/conversations?agent_id='+id);const d=await r.json();const convs=d.conversations||[];if(convs.length>0){const conv=convs[0];const mr=await fetch(API+'/messages/conversation/'+conv.id+'?limit=50');const md=await mr.json();const msgs=md.messages||[];document.getElementById('messageArea').innerHTML=msgs.map(m=>'<div class="msg"><div class="msg-sender">'+m.sender_id+'</div>'+'<div class="msg-content">'+m.content+'</div>'+'<div class="msg-time">'+m.created_at+'</div></div>').join('')||'<div class="empty-state">No messages yet</div>';}else{document.getElementById('messageArea').innerHTML='<div class="empty-state">No conversations yet</div>';}}
-function connectWS(){const proto=location.protocol==='https:'?'wss':'ws';ws=new WebSocket(proto+'://'+location.host+'/ws/dashboard-viewer');ws.onopen=()=>{document.getElementById('connStatus').textContent='Connected ●';document.getElementById('connStatus').style.color='#3fb950'};ws.onmessage=(e)=>{const d=JSON.parse(e.data);if(d.type==='agent_status')loadAgents();if(d.type==='new_message')loadFeed();if(selectedAgent)selectAgent(selectedAgent)};ws.onclose=()=>{document.getElementById('connStatus').textContent='Disconnected ○';document.getElementById('connStatus').style.color='#f85149';setTimeout(connectWS,3000)};}
-async function init(){await loadAgents();await loadFeed();await loadStats();connectWS()}
-init();setInterval(()=>{loadAgents();loadStats()},30000);
-</script></body></html>"""
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Agent Messenger Server")
-    parser.add_argument("--config", default="config.yaml", help="Config file path")
-    parser.add_argument("--host", default=None, help="Override host")
-    parser.add_argument("--port", type=int, default=None, help="Override port")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    cfg = load_config(args.config)
-    host = args.host or cfg["server"]["host"]
-    port = args.port or cfg["server"]["port"]
-
-    import uvicorn
-    app = create_app(args.config)
-    uvicorn.run(app, host=host, port=port, log_level="info")
-
-
-if __name__ == "__main__":
-    main()
 
 # Module-level app for uvicorn (production uses main(), this is for dev/direct run)
 app = create_app("config.yaml")
