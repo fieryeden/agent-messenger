@@ -22,6 +22,21 @@ from server.routes import pins as pin_routes
 from server.routes import polls as poll_routes
 from server.routes import conversations as conv_routes
 from server.routes import messages as msg_routes
+# v0.6.0 routes
+from server.routes import roles as role_routes
+from server.routes import read_cursors as read_cursor_routes
+from server.routes import channels as channel_routes
+from server.routes import mentions as mention_routes
+from server.routes import notification_prefs as notif_pref_routes
+from server.routes import bookmarks as bookmark_routes
+from server.routes import custom_emojis as custom_emoji_routes
+from server.routes import webhooks as webhook_routes
+from server.routes import event_subscriptions as event_sub_routes
+from server.routes import slash_commands as slash_cmd_routes
+from server.routes import scheduled_messages as scheduled_msg_routes
+from server.routes import embeds as embed_routes
+from server.routes import translations as translation_routes
+from server.routes import v06_extended as v06_ext_routes
 from server.security import (
     AuditLogger,
     GracefulShutdown,
@@ -105,7 +120,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     app = FastAPI(
         title="Agent Messenger",
-        version="0.5.0",
+        version="0.6.0",
         description="Inter-agent communication platform with JWT auth, real-time messaging, and dashboard",
     )
 
@@ -224,7 +239,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     async def health():
         return {
             "status": "healthy",
-            "version": "0.5.0",
+            "version": "0.6.0",
             "ws_connections": len(ws_manager.active),
             "auth_enabled": config.get("auth", {}).get("enabled", False),
         }
@@ -258,6 +273,21 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     app.include_router(file_routes.router, prefix=v1_prefix)
     app.include_router(pin_routes.router, prefix=v1_prefix)
     app.include_router(poll_routes.router, prefix=v1_prefix)
+    # v0.6.0 routers
+    app.include_router(role_routes.router, prefix=v1_prefix)
+    app.include_router(read_cursor_routes.router, prefix=v1_prefix)
+    app.include_router(channel_routes.router, prefix=v1_prefix)
+    app.include_router(mention_routes.router, prefix=v1_prefix)
+    app.include_router(notif_pref_routes.router, prefix=v1_prefix)
+    app.include_router(bookmark_routes.router, prefix=v1_prefix)
+    app.include_router(custom_emoji_routes.router, prefix=v1_prefix)
+    app.include_router(webhook_routes.router, prefix=v1_prefix)
+    app.include_router(event_sub_routes.router, prefix=v1_prefix)
+    app.include_router(slash_cmd_routes.router, prefix=v1_prefix)
+    app.include_router(scheduled_msg_routes.router, prefix=v1_prefix)
+    app.include_router(embed_routes.router, prefix=v1_prefix)
+    app.include_router(translation_routes.router, prefix=v1_prefix)
+    app.include_router(v06_ext_routes.router, prefix=v1_prefix)
 
     # Backward-compat unversioned mount
     app.include_router(auth_routes.router, prefix="/api")
@@ -268,6 +298,20 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     app.include_router(file_routes.router, prefix="/api")
     app.include_router(pin_routes.router, prefix="/api")
     app.include_router(poll_routes.router, prefix="/api")
+    app.include_router(role_routes.router, prefix="/api")
+    app.include_router(read_cursor_routes.router, prefix="/api")
+    app.include_router(channel_routes.router, prefix="/api")
+    app.include_router(mention_routes.router, prefix="/api")
+    app.include_router(notif_pref_routes.router, prefix="/api")
+    app.include_router(bookmark_routes.router, prefix="/api")
+    app.include_router(custom_emoji_routes.router, prefix="/api")
+    app.include_router(webhook_routes.router, prefix="/api")
+    app.include_router(event_sub_routes.router, prefix="/api")
+    app.include_router(slash_cmd_routes.router, prefix="/api")
+    app.include_router(scheduled_msg_routes.router, prefix="/api")
+    app.include_router(embed_routes.router, prefix="/api")
+    app.include_router(translation_routes.router, prefix="/api")
+    app.include_router(v06_ext_routes.router, prefix="/api")
 
     # ── Audit API ──
     @app.get("/api/v1/audit")
