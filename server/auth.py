@@ -212,6 +212,15 @@ async def get_current_identity(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
 ) -> AuthIdentity:
     """FastAPI dependency: resolve identity from Authorization header."""
+    # If middleware already resolved identity, use it
+    middleware_id = getattr(request.state, "auth_identity", None)
+    if middleware_id:
+        return AuthIdentity(
+            agent_id=middleware_id["agent_id"],
+            scopes=middleware_id["scopes"],
+            auth_type=middleware_id["auth_type"],
+        )
+
     # If auth is disabled, allow all
     from server.db_accessor import get_db
     config = getattr(request.app.state, "config", {})
@@ -233,6 +242,15 @@ async def get_current_identity(
     identity = _get_identity_from_api_key(token, db)
     if identity:
         return identity
+
+    # Try config-level API keys (backward compat with middleware)
+    config_api_keys = config.get("auth", {}).get("api_keys", [])
+    if config_api_keys and token in config_api_keys:
+        return AuthIdentity(
+            agent_id="config-api-user",
+            scopes=["agent", "admin"],
+            auth_type="config_api_key",
+        )
 
     raise HTTPException(status_code=401, detail="Invalid or expired token")
 

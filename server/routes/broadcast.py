@@ -3,9 +3,10 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from server.auth import AuthIdentity, get_current_identity
 from server.db_accessor import get_db
 from server.security import sanitize_agent_id, sanitize_content
 
@@ -22,7 +23,7 @@ class BroadcastSend(BaseModel):
 
 
 @router.post("")
-async def broadcast_message(body: BroadcastSend):
+async def broadcast_message(body: BroadcastSend, identity: AuthIdentity = Depends(get_current_identity)):
     """Send a message to all online agents via the broadcast channel."""
     try:
         safe_sender = sanitize_agent_id(body.sender_id)
@@ -32,6 +33,9 @@ async def broadcast_message(body: BroadcastSend):
 
     try:
         db = get_db()
+        # Auth scope: verify sender matches identity unless admin
+        if not identity.has_scope("admin") and identity.agent_id != safe_sender:
+            raise HTTPException(status_code=403, detail="Not authorized to broadcast as another agent")
         if not db.get_agent(safe_sender):
             raise HTTPException(status_code=400, detail="Sender agent not registered")
 

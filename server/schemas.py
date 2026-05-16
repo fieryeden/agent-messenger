@@ -77,8 +77,7 @@ class ConversationListResponse(PaginatedResponse):
 
 class TypingEntry(BaseModel):
 	agent_id: str
-	conversation_id: str
-	timestamp: str
+	started_at: str
 
 
 class TypingResponse(BaseModel):
@@ -138,15 +137,15 @@ class MessageDeleteResponse(BaseModel):
 	soft: bool = True
 
 
-class ReactionEntry(BaseModel):
-	agent_id: str
+class ReactionGroup(BaseModel):
 	emoji: str
-	created_at: str
+	count: int
+	agents: list[str] = []
 
 
 class ReactionsResponse(BaseModel):
 	status: str = "ok"
-	reactions: list[ReactionEntry] = []
+	reactions: list[ReactionGroup] = []
 
 
 class SearchResult(BaseModel):

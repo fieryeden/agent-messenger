@@ -4,9 +4,10 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from server.auth import AuthIdentity, get_current_identity
 from server.db_accessor import get_db
 from server.schemas import (
 	MessageSendResponse, MessageListResponse, OkResponse, ReadersResponse,
@@ -194,7 +195,7 @@ async def mark_delivered(msg_id: str, body: MarkRead):
 
 
 @router.patch("/{msg_id}", response_model=MessageEditResponse)
-async def edit_message(msg_id: str, body: MessageEdit):
+async def edit_message(msg_id: str, body: MessageEdit, identity: AuthIdentity = Depends(get_current_identity)):
 	"""Edit a message's content. Stores original in edited_content."""
 	try:
 		safe_msg = sanitize_uuid(msg_id)
@@ -207,6 +208,9 @@ async def edit_message(msg_id: str, body: MessageEdit):
 		msg = db.get_message(safe_msg)
 		if not msg:
 			raise HTTPException(status_code=404, detail="Message not found")
+		# Auth scope: verify identity matches editor unless admin
+		if not identity.has_scope("admin") and identity.agent_id != safe_editor:
+			raise HTTPException(status_code=403, detail="Cannot edit as another agent")
 		if msg["sender_id"] != safe_editor:
 			raise HTTPException(status_code=403, detail="Only the original sender can edit this message")
 		if msg.get("deleted_at"):
@@ -230,7 +234,7 @@ async def edit_message(msg_id: str, body: MessageEdit):
 
 
 @router.delete("/{msg_id}", response_model=MessageDeleteResponse)
-async def delete_message(msg_id: str, soft: bool = True, deleted_by: str = ""):
+async def delete_message(msg_id: str, soft: bool = True, deleted_by: str = "", identity: AuthIdentity = Depends(get_current_identity)):
 	"""Delete a message. Default is soft delete (marks deleted_at). Use soft=false for hard delete."""
 	try:
 		safe_msg = sanitize_uuid(msg_id)
@@ -242,6 +246,9 @@ async def delete_message(msg_id: str, soft: bool = True, deleted_by: str = ""):
 		msg = db.get_message(safe_msg)
 		if not msg:
 			raise HTTPException(status_code=404, detail="Message not found")
+		# Auth scope: agents can only delete their own messages
+		if not identity.has_scope("admin") and identity.agent_id != msg["sender_id"]:
+			raise HTTPException(status_code=403, detail="Not authorized to delete this message")
 		if soft:
 			ok = db.soft_delete_message(safe_msg)
 		else:

@@ -76,6 +76,10 @@ def load_config(config_path="config.yaml") -> dict:
         with open(config_path) as f:
             user_config = yaml.safe_load(f) or {}
         _deep_merge(config, user_config)
+    # Env var override for auth (MESSENGER_AUTH_ENABLED)
+    env_auth = os.getenv("MESSENGER_AUTH_ENABLED")
+    if env_auth is not None:
+        config["auth"]["enabled"] = env_auth.lower() in ("1", "true", "yes")
     return config
 
 
@@ -113,6 +117,9 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Store config on app.state so dependencies can access it
+    app.state.config = config
 
     # Init components
     db = MessengerDB(config["database"]["path"])

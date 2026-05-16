@@ -2,10 +2,11 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Optional
 
+from server.auth import AuthIdentity, get_current_identity
 from server.db_accessor import get_db
 from server.schemas import AgentSingleResponse, AgentListResponse, AgentDeletedResponse, OkResponse
 from server.security import sanitize_agent_id, sanitize_string
@@ -128,7 +129,7 @@ async def update_agent(agent_id: str, body: AgentUpdate):
 
 
 @router.delete("/{agent_id}", response_model=AgentDeletedResponse)
-async def delete_agent(agent_id: str):
+async def delete_agent(agent_id: str, identity: AuthIdentity = Depends(get_current_identity)):
 	"""Delete an agent and all its memberships."""
 	try:
 		safe_id = sanitize_agent_id(agent_id)
@@ -136,6 +137,9 @@ async def delete_agent(agent_id: str):
 		raise HTTPException(status_code=400, detail=str(e))
 	try:
 		db = get_db()
+		# Auth scope: agents can only delete themselves unless admin
+		if not identity.has_scope("admin") and identity.agent_id != safe_id:
+			raise HTTPException(status_code=403, detail="Not authorized to delete this agent")
 		if not db.get_agent(safe_id):
 			raise HTTPException(status_code=404, detail="Agent not found")
 		ok = db.delete_agent(safe_id)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 
+from server.auth import AuthIdentity, get_current_identity
 from server.db import MessengerDB
 from server.db_accessor import get_db
 from server.security import sanitize_uuid, sanitize_agent_id, sanitize_string
@@ -97,15 +98,18 @@ def list_message_files(message_id: str, db: MessengerDB = Depends(get_db)):
 
 
 @router.delete("/{file_id}")
-def delete_file(file_id: str, agent_id: str = Query(...), db: MessengerDB = Depends(get_db)):
+def delete_file(file_id: str, agent_id: str = Query(...), db: MessengerDB = Depends(get_db), identity: AuthIdentity = Depends(get_current_identity)):
     """Delete a file (only uploader or admin)."""
     file_id = sanitize_uuid(file_id)
-    agent_id = sanitize_agent_id(agent_id)
+    agent_id_local = sanitize_agent_id(agent_id)
 
     record = db.get_file(file_id)
     if not record:
         raise HTTPException(404, "File not found")
-    if record["uploader_id"] != agent_id:
+    # Auth scope: verify identity matches agent_id unless admin
+    if not identity.has_scope("admin") and identity.agent_id != agent_id_local:
+        raise HTTPException(403, "Not authorized to delete as another agent")
+    if record["uploader_id"] != agent_id_local:
         raise HTTPException(403, "Only the uploader can delete this file")
 
     # Remove from disk

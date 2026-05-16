@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from server.auth import AuthIdentity, get_current_identity
 from server.db import MessengerDB
 from server.db_accessor import get_db
 from server.security import sanitize_uuid, sanitize_agent_id, sanitize_content
@@ -64,15 +65,19 @@ def close_poll(
     poll_id: str,
     agent_id: str = Query(...),
     db: MessengerDB = Depends(get_db),
+    identity: AuthIdentity = Depends(get_current_identity),
 ):
     """Close a poll (only creator can close)."""
     poll_id = sanitize_uuid(poll_id)
-    agent_id = sanitize_agent_id(agent_id)
+    agent_id_local = sanitize_agent_id(agent_id)
 
     poll = db.get_poll(poll_id)
     if not poll:
         raise HTTPException(404, "Poll not found")
-    if poll["creator_id"] != agent_id:
+    # Auth scope: verify identity matches agent_id unless admin
+    if not identity.has_scope("admin") and identity.agent_id != agent_id_local:
+        raise HTTPException(403, "Not authorized to close as another agent")
+    if poll["creator_id"] != agent_id_local:
         raise HTTPException(403, "Only the poll creator can close it")
     if poll["closed_at"]:
         raise HTTPException(400, "Poll already closed")
